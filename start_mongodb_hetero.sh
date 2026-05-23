@@ -39,7 +39,7 @@ EVAL_DIR="${REMOTE_DIR}/eval"
 # WOC PARAMETERS
 # -----------------------------
 NUM_SERVERS="${NUM_SERVERS:-5}"
-NUM_CLIENTS="${NUM_CLIENTS:-2}"
+NUM_CLIENTS="${NUM_CLIENTS:-4}"
 THRESHOLD="${THRESHOLD:-2}"
 OPS="${OPS:-0}"
 EVAL_TYPE=1
@@ -66,12 +66,22 @@ fi
 # -----------------------------
 # CLOUD IP LIST (HETEROGENEOUS)
 # -----------------------------
+# Heterogeneous: 2 strong (cora-c32-*), 2 medium + 1 weak (cora-c8-*).
+# Order MUST match the first NUM_SERVERS rows of config/cluster_hetero.conf
+# (server i binds to config row i -- see conns.go).
 SERVER_IPS=(
-"192.168.73.159" "192.168.73.84" "192.168.73.218" "192.168.73.219" "192.168.73.25"
+"192.168.73.93"   # cora-c32-1  strong
+"192.168.73.107"  # cora-c32-2  strong
+"192.168.73.79"   # cora-c8-1   medium
+"192.168.73.183"  # cora-c8-2   medium
+"192.168.73.211"  # cora-c8-3   weak
 )
 
 CLIENT_HOST_IPS=(
-"192.168.73.69" "192.168.73.235"
+"192.168.73.66"   # cora-c4-1
+"192.168.73.162"  # cora-c4-2
+"192.168.73.234"  # cora-c4-3
+"192.168.73.11"   # cora-c4-4
 )
 
 CLIENTS_PER_VM=1
