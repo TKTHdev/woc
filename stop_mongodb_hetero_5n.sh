@@ -14,18 +14,20 @@ LOCAL_EVAL_DIR="${SCRIPT_DIR}/eval"
 MERGED_DIR="${LOCAL_EVAL_DIR}/merged"
 MERGE_SCRIPT="${SCRIPT_DIR}/merge_eval.py"
 
-# 5-Node Cluster: 2 Strong (c16) + 3 Weak (c4)
+# 5-Node Cluster: 2 Strong (cora-c32) + 3 Weak (cora-c8)
 SERVER_IPS=(
-"192.168.73.159"  # tani-hetero-c16-1 (strong)
-"192.168.73.84"   # tani-hetero-c16-2 (strong)
-"192.168.73.69"   # tani-c4-1 (weak)
-"192.168.73.235"  # tani-c4-2 (weak)
-"192.168.73.194"  # tani-c4-3 (weak)
+"192.168.73.93"   # cora-c32-1 (strong)
+"192.168.73.107"  # cora-c32-2 (strong)
+"192.168.73.79"   # cora-c8-1  (weak)
+"192.168.73.183"  # cora-c8-2  (weak)
+"192.168.73.211"  # cora-c8-3  (weak)
 )
 
 CLIENT_HOST_IPS=(
-"192.168.73.218"
-"192.168.73.219"
+"192.168.73.66"   # cora-c4-1
+"192.168.73.162"  # cora-c4-2
+"192.168.73.234"  # cora-c4-3
+"192.168.73.11"   # cora-c4-4
 )
 
 SERVER_ID_FILTER="0-$((${#SERVER_IPS[@]} - 1))"

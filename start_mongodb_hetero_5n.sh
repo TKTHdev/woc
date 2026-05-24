@@ -34,7 +34,7 @@ MONGODB_REPLICA_SET="wocrs"
 
 # WOC PARAMETERS
 NUM_SERVERS=5
-NUM_CLIENTS=2
+NUM_CLIENTS=4
 THRESHOLD=1
 OPS=0
 EVAL_TYPE=0
@@ -54,18 +54,21 @@ ENABLE_PRIORITY="true"
 LATENCY_DEBUG="false"
 SERVER_BATCHING="false"
 
-# 5-Node Cluster: 2 Strong (c16) + 3 Weak (c4)
+# 5-Node Cluster: 2 Strong (cora-c32) + 3 Weak (cora-c8)
+# Order must match rows 0-4 of config/cluster_hetero_5n_2s3w.conf
 SERVER_IPS=(
-"192.168.73.159"  # tani-hetero-c16-1 (strong)
-"192.168.73.84"   # tani-hetero-c16-2 (strong)
-"192.168.73.69"   # tani-c4-1 (weak)
-"192.168.73.235"  # tani-c4-2 (weak)
-"192.168.73.194"  # tani-c4-3 (weak)
+"192.168.73.93"   # cora-c32-1 (strong)
+"192.168.73.107"  # cora-c32-2 (strong)
+"192.168.73.79"   # cora-c8-1  (weak)
+"192.168.73.183"  # cora-c8-2  (weak)
+"192.168.73.211"  # cora-c8-3  (weak)
 )
 
 CLIENT_HOST_IPS=(
-"192.168.73.218"
-"192.168.73.219"
+"192.168.73.66"   # cora-c4-1
+"192.168.73.162"  # cora-c4-2
+"192.168.73.234"  # cora-c4-3
+"192.168.73.11"   # cora-c4-4
 )
 
 CLIENTS_PER_VM=1
@@ -302,8 +305,8 @@ echo "✓ HETEROGENEOUS 5-NODE MONGODB CLUSTER STARTED"
 echo "=============================================="
 echo ""
 echo "Cluster Configuration:"
-echo "  - 2 Strong nodes (c16): 192.168.73.159, 192.168.73.84"
-echo "  - 3 Weak nodes (c4):   192.168.73.69, 192.168.73.235, 192.168.73.194"
+echo "  - 2 Strong nodes (c32): 192.168.73.93, 192.168.73.107"
+echo "  - 3 Weak nodes (c8):   192.168.73.79, 192.168.73.183, 192.168.73.211"
 echo "  - Workload: $WORKLOAD"
 echo "  - MongoDB Replica Set: $MONGODB_REPLICA_SET"
 echo ""
