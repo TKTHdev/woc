@@ -1047,6 +1047,7 @@ EOF
 
         # D4: Bursting
         echo "── D4: Bursting (10s calm / 5s spike at 1000ms) ────────────────"
+        TIMESERIES_ENABLED=true
         BASE_ENV=(
             "NUM_SERVERS=5" "NUM_CLIENTS=2" "THRESHOLD=1" "OPS=0"
             "EVAL_TYPE=0" "BATCHSIZE=1" "MSG_SIZE=512" "MODE=1"
@@ -1104,6 +1105,7 @@ EOF
 
         # D4: Bursting with MAX_INFLIGHT=5
         echo "── D4: Bursting (MAX_INFLIGHT=5, 15s calm / 10s spike) ──────────"
+        TIMESERIES_ENABLED=true
         BASE_ENV=(
             "NUM_SERVERS=5" "NUM_CLIENTS=2" "THRESHOLD=1" "OPS=0"
             "EVAL_TYPE=0" "BATCHSIZE=1" "MSG_SIZE=512" "MODE=1"

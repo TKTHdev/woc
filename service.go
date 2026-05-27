@@ -336,15 +336,6 @@ func conJobMongoDB(args *Args, reply *Reply) error {
 		reply.Success = true
 		reply.Accepted = true
 		reply.ExeResult = time.Since(start).String()
-
-		if applyAsSlowPath && mongoDbFollower != nil && len(args.CmdMongo) > 0 {
-			queries := append([]mongodb.Query(nil), args.CmdMongo...)
-			go func(clientClock int, asyncQueries []mongodb.Query) {
-				if _, _, err := mongoDbFollower.FollowerAPI(asyncQueries); err != nil {
-					log.Errorf("[SLOW-FOLLOWER] MongoDB async apply failed | ClientClock=%d | err: %v", clientClock, err)
-				}
-			}(args.ClientClock, queries)
-		}
 		
 		return nil
 	}

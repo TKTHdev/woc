@@ -20,7 +20,7 @@ CONFIG_PATH_LOCAL="${SCRIPT_DIR}/config/cluster_homo.conf"
 CONFIG_PATH_REMOTE="${REMOTE_DIR}/config/cluster_homo.conf"
 MERGE_SCRIPT="${SCRIPT_DIR}/merge_eval.py"
 
-SERVER_COUNTS=(3 5 7 11 20 30 40)
+SERVER_COUNTS=(3 5 7 11 20 30)
 CLIENT_IPS=(
     "192.168.73.45"
     "192.168.73.229"
@@ -261,7 +261,7 @@ Environment overrides:
   WORKLOAD=a|b|c|d|e|f
   RUNTIME_SECONDS=30
 
-Runs homogeneous cluster sizes: 3, 5, 7, 11, 20, 30, 40
+Runs homogeneous cluster sizes: 3, 5, 7, 11, 20, 30
 with 2 fixed clients and MAX_INFLIGHT equal to the server count.
 EOF
     exit 0

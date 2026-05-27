@@ -1,11 +1,11 @@
 #!/bin/bash
 # ================================================================
-# EVAL 1: Independent vs Common Ratio Evaluation
-# Tests various workload compositions: 100/0, 90/10, 80/20, 60/40, 40/60, 20/80, 10/90, 0/100
-# Each configuration runs for 30 seconds
+# EVAL 5: MongoDB Workload Sweep
+# Sweeps workloads a-f with fixed indep/common ratios and pipeline depth.
+# MongoDB stays up for the full sweep; only WOC processes restart.
 # ================================================================
 
-set -u
+set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
@@ -13,15 +13,17 @@ cd "$SCRIPT_DIR"
 USER="ubuntu"
 SSH_KEY="/home/ubuntu/.ssh/tani.pem"
 REMOTE_DIR="/home/ubuntu/woc"
+REMOTE_WORKDATA_DIR="${REMOTE_DIR}/ycsb/workData"
 BINARY="woc"
 CONFIG_PATH="${REMOTE_DIR}/config/cluster_hetero_5n_2s3w.conf"
 LOG_DIR="${REMOTE_DIR}/logs"
 EVAL_DIR="${REMOTE_DIR}/eval"
 MERGE_SCRIPT="${SCRIPT_DIR}/merge_eval.py"
-RESULT_ROOT="${SCRIPT_DIR}/results/eval1_indep_common_ratio"
+RESULT_ROOT="${SCRIPT_DIR}/results/eval5_workload_sweep"
 RUN_TS="$(date +%Y%m%d_%H%M%S)"
 RUN_DIR="${RESULT_ROOT}/${RUN_TS}"
-RUNTIME=30  # 30 seconds per test
+
+RUNTIME=30
 NUM_SERVERS=5
 NUM_CLIENTS=2
 THRESHOLD=1
@@ -30,6 +32,10 @@ PIPELINE_MODE=true
 MAX_INFLIGHT=5
 MONGO_CLIENT_POOL=16
 LOG_LEVEL="info"
+INDEP_RATIO=90.0
+COMMON_RATIO=10.0
+
+WORKLOADS=(a b c d e f)
 
 # 5-Node Cluster: 2 Strong (c16) + 3 Weak (c4)
 SERVER_IPS=(
@@ -45,28 +51,15 @@ CLIENT_HOST_IPS=(
 "192.168.73.219"
 )
 
-WORKLOAD="a"
 SSH_OPTS=(-i "$SSH_KEY" -o BatchMode=yes -o ConnectTimeout=10)
 
 mkdir -p "$RUN_DIR"
 
-# Test cases: INDEP_RATIO/COMMON_RATIO pairs
-TEST_CASES=(
-"100.0/0.0"
-"90.0/10.0"
-"80.0/20.0"
-"60.0/40.0"
-"40.0/60.0"
-"20.0/80.0"
-"10.0/90.0"
-"0.0/100.0"
-)
-
 echo "=============================================="
-echo "EVAL 1: Independent vs Common Ratio"
+echo "EVAL 5: MongoDB Workload Sweep"
 echo "=============================================="
-echo "Test cases: ${#TEST_CASES[@]}"
-echo "Runtime per test: ${RUNTIME}s"
+echo "Workloads: ${WORKLOADS[*]}"
+echo "Runtime per workload: ${RUNTIME}s"
 echo ""
 
 remote_exec() {
@@ -77,7 +70,38 @@ remote_exec() {
 
 create_remote_dirs() {
     for ip in "${SERVER_IPS[@]}" "${CLIENT_HOST_IPS[@]}"; do
-        remote_exec "$ip" "mkdir -p '$REMOTE_DIR' '$LOG_DIR' '$EVAL_DIR' '$REMOTE_DIR/mongodb_data'"
+        remote_exec "$ip" "mkdir -p '$REMOTE_DIR' '$REMOTE_DIR/config' '$LOG_DIR' '$EVAL_DIR' '$REMOTE_WORKDATA_DIR' '$REMOTE_DIR/mongodb_data'"
+    done
+}
+
+check_local_workload_files() {
+    local workload
+    for workload in "${WORKLOADS[@]}"; do
+        if [ ! -f "${SCRIPT_DIR}/ycsb/workData/run_workload${workload}.dat" ]; then
+            echo "ERROR: missing ${SCRIPT_DIR}/ycsb/workData/run_workload${workload}.dat"
+            exit 1
+        fi
+    done
+}
+
+distribute_workload_files() {
+    local workload
+    for workload in "${WORKLOADS[@]}"; do
+        local local_file="${SCRIPT_DIR}/ycsb/workData/run_workload${workload}.dat"
+        for ip in "${SERVER_IPS[@]}" "${CLIENT_HOST_IPS[@]}"; do
+            scp -q -o BatchMode=yes -o ConnectTimeout=10 -i "$SSH_KEY" "$local_file" "$USER@$ip:$REMOTE_WORKDATA_DIR/"
+        done
+    done
+}
+
+verify_remote_workload_files() {
+    local workload=$1
+    local host
+    for host in "${SERVER_IPS[@]}" "${CLIENT_HOST_IPS[@]}"; do
+        if ! remote_exec "$host" "test -f '$REMOTE_WORKDATA_DIR/run_workload${workload}.dat'"; then
+            echo "ERROR: remote workload file missing on $host: run_workload${workload}.dat"
+            exit 1
+        fi
     done
 }
 
@@ -130,13 +154,12 @@ init_replica_set() {
 build_and_distribute() {
     echo "  Building WOC binary..."
     go build -o "$BINARY"
-    
-    echo "  Distributing to all nodes..."
+
+    echo "  Distributing binary and config to all nodes..."
     for ip in "${SERVER_IPS[@]}" "${CLIENT_HOST_IPS[@]}"; do
-        scp "${SSH_OPTS[@]}" "$BINARY" "$USER@$ip:$REMOTE_DIR/" 2>/dev/null &
+        scp -q -o BatchMode=yes -o ConnectTimeout=10 -i "$SSH_KEY" "$BINARY" "$USER@$ip:$REMOTE_DIR/"
+        scp -q -o BatchMode=yes -o ConnectTimeout=10 -i "$SSH_KEY" "$CONFIG_PATH" "$USER@$ip:$REMOTE_DIR/config/"
     done
-    wait
-    echo "  ✓ Distribution complete"
 }
 
 archive_case() {
@@ -184,20 +207,19 @@ merge_case_results() {
 }
 
 start_workload_nodes() {
-    local indep=$1
-    local common=$2
+    local workload=$1
 
-    echo "  Starting WOC servers..."
+    echo "  Starting WOC servers for workload ${workload}..."
     for i in "${!SERVER_IPS[@]}"; do
         ip="${SERVER_IPS[$i]}"
-        remote_exec "$ip" "pkill -f 'woc.*-path' 2>/dev/null || true; nohup '$REMOTE_DIR/$BINARY' -id=$i -path='$CONFIG_PATH' -et=1 -n=$NUM_SERVERS -t=$THRESHOLD -b=$BATCHSIZE -mode=1 -mcli=$MONGO_CLIENT_POOL -mload='$WORKLOAD' -bcomp=object-specific -indep=$indep -common=$common -pipeline=$PIPELINE_MODE -maxinflight=$MAX_INFLIGHT -log=$LOG_LEVEL -ep=true -role=0 > '$LOG_DIR/server_${i}_indep_${indep}_common_${common}.log' 2>&1 &"
+        remote_exec "$ip" "pkill -f 'woc.*-path' 2>/dev/null || true; nohup '$REMOTE_DIR/$BINARY' -id=$i -path='$CONFIG_PATH' -et=1 -n=$NUM_SERVERS -t=$THRESHOLD -b=$BATCHSIZE -mode=1 -mcli=$MONGO_CLIENT_POOL -mload=$workload -bcomp=object-specific -indep=$INDEP_RATIO -common=$COMMON_RATIO -pipeline=$PIPELINE_MODE -maxinflight=$MAX_INFLIGHT -log=$LOG_LEVEL -ep=true -role=0 > '$LOG_DIR/server_${i}_workload_${workload}.log' 2>&1 &"
     done
 
-    echo "  Starting WOC clients..."
+    echo "  Starting WOC clients for workload ${workload}..."
     for i in "${!CLIENT_HOST_IPS[@]}"; do
         ip="${CLIENT_HOST_IPS[$i]}"
         client_id=$((NUM_SERVERS + i))
-        remote_exec "$ip" "pkill -f 'woc.*-path' 2>/dev/null || true; nohup '$REMOTE_DIR/$BINARY' -id=$client_id -path='$CONFIG_PATH' -et=1 -n=$NUM_SERVERS -t=$THRESHOLD -b=$BATCHSIZE -mode=1 -mload='$WORKLOAD' -bcomp=object-specific -indep=$indep -common=$common -pipeline=$PIPELINE_MODE -maxinflight=$MAX_INFLIGHT -log=$LOG_LEVEL -ops=0 -role=1 > '$LOG_DIR/client_${i}_indep_${indep}_common_${common}.log' 2>&1 &"
+        remote_exec "$ip" "pkill -f 'woc.*-path' 2>/dev/null || true; nohup '$REMOTE_DIR/$BINARY' -id=$client_id -path='$CONFIG_PATH' -et=1 -n=$NUM_SERVERS -t=$THRESHOLD -b=$BATCHSIZE -mode=1 -mload=$workload -bcomp=object-specific -indep=$INDEP_RATIO -common=$COMMON_RATIO -pipeline=$PIPELINE_MODE -maxinflight=$MAX_INFLIGHT -log=$LOG_LEVEL -ops=0 -role=1 > '$LOG_DIR/client_${i}_workload_${workload}.log' 2>&1 &"
     done
 }
 
@@ -220,49 +242,45 @@ cleanup() {
 
 trap cleanup EXIT
 
-start_cluster() {
-    local indep=$1
-    local common=$2
-    local test_num=$3
-    local label="indep_${indep}_common_${common}"
-    
-    echo ""
-    echo "--- Test $test_num: INDEP=$indep, COMMON=$common ---"
-    
-    start_workload_nodes "$indep" "$common"
-    
-    echo "  Cluster started. Running for ${RUNTIME}s..."
-    sleep $RUNTIME
-    
-    # Stop only workload processes between cases; MongoDB stays up for the full sweep.
-    echo "  Stopping workload processes..."
-    stop_workload_nodes
-    sleep 2
-
-    echo "  Archiving results..."
-    archive_case "$label" "${SERVER_IPS[@]}" "${CLIENT_HOST_IPS[@]}"
-    merge_case_results "$label"
-}
-
-# Run tests
+check_local_workload_files
 build_and_distribute
+create_remote_dirs
+distribute_workload_files
+
+for workload in "${WORKLOADS[@]}"; do
+    verify_remote_workload_files "$workload"
+done
 
 start_mongo_cluster
 init_replica_set
 
 test_num=1
-for case in "${TEST_CASES[@]}"; do
-    indep=${case%/*}
-    common=${case#*/}
-    start_cluster "$indep" "$common" "$test_num"
+for workload in "${WORKLOADS[@]}"; do
+    local_label="workload_${workload}"
+
+    echo ""
+    echo "--- Test $test_num: WORKLOAD=${workload} ---"
+
+    start_workload_nodes "$workload"
+
+    echo "  Cluster started. Running for ${RUNTIME}s..."
+    sleep "$RUNTIME"
+
+    echo "  Stopping workload processes..."
+    stop_workload_nodes
+    sleep 2
+
+    echo "  Archiving results..."
+    archive_case "$local_label" "${SERVER_IPS[@]}" "${CLIENT_HOST_IPS[@]}"
+    merge_case_results "$local_label"
+
     test_num=$((test_num + 1))
 done
 
 echo ""
 echo "=============================================="
-echo "✓ EVAL 1 COMPLETE"
+echo "✓ EVAL 5 COMPLETE"
 echo "=============================================="
 echo ""
 echo "Results archived in: $RUN_DIR"
-echo ""
 echo "Merged client/server summaries are under: $RUN_DIR/*/merged/"

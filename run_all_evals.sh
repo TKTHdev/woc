@@ -21,6 +21,7 @@ RUN_EVAL1="${1:-1}"
 RUN_EVAL2="${2:-1}"
 RUN_EVAL3="${3:-1}"
 RUN_EVAL4="${4:-1}"
+RUN_EVAL5="${5:-1}"
 WORKLOAD="${WORKLOAD:-a}"
 RUNTIME_SECONDS="${RUNTIME_SECONDS:-0}"
 
@@ -30,11 +31,12 @@ EVAL1_SCRIPT="eval_1_indep_common_ratio_fixed.sh"
 EVAL2_SCRIPT="eval_2_max_inflight_fixed.sh"
 EVAL3_SCRIPT="eval_3_fault_tolerance_fixed.sh"
 EVAL4_SCRIPT="eval_4_network_delay_fixed.sh"
+EVAL5_SCRIPT="eval_5_workload_sweep.sh"
 
 if [ "${1:-}" = "--help" ]; then
     cat <<'EOF'
 Usage:
-  bash run_all_evals.sh [eval1] [eval2] [eval3] [eval4]
+    bash run_all_evals.sh [eval1] [eval2] [eval3] [eval4] [eval5]
   bash run_all_evals.sh --workload [a-f] [runtime_seconds]
     echo ""
 Eval toggles (1=run, 0=skip):
@@ -42,6 +44,7 @@ Eval toggles (1=run, 0=skip):
   eval2: Max Pipeline In-Flight (default: 1)
   eval3: Fault Tolerance (default: 1)
   eval4: Network Delay (default: 1)
+    eval5: Workload Sweep (default: 1)
 
 Examples:
   bash run_all_evals.sh 1 1 0 0
@@ -88,7 +91,7 @@ if [ "${1:-}" = "--workload" ]; then
     exit $EXIT_STATUS
 fi
 
-for required in "$EVAL1_SCRIPT" "$EVAL2_SCRIPT" "$EVAL3_SCRIPT" "$EVAL4_SCRIPT"; do
+for required in "$EVAL1_SCRIPT" "$EVAL2_SCRIPT" "$EVAL3_SCRIPT" "$EVAL4_SCRIPT" "$EVAL5_SCRIPT"; do
     if [ ! -f "$required" ]; then
         echo "ERROR: required fixed script not found: $required"
         exit 1
@@ -142,6 +145,15 @@ if [ "$RUN_EVAL4" -eq 1 ]; then
     echo "Running EVAL 4: Network Delay Impact"
     echo "════════════════════════════════════════════════════════════════"
     run_eval_script "EVAL 4" "$EVAL4_SCRIPT"
+fi
+
+# EVAL 5: Workload Sweep
+if [ "$RUN_EVAL5" -eq 1 ]; then
+    echo ""
+    echo "════════════════════════════════════════════════════════════════"
+    echo "Running EVAL 5: Workload Sweep"
+    echo "════════════════════════════════════════════════════════════════"
+    run_eval_script "EVAL 5" "$EVAL5_SCRIPT"
 fi
 
 END_TIME=$(date +%s)
