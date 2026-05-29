@@ -10,7 +10,6 @@ import (
 
 var latencyDebug = os.Getenv("LATENCY_DEBUG") == "true"
 
-
 type Args struct {
 	ClientID    int
 	ClientClock int
@@ -25,7 +24,7 @@ type Args struct {
 	IsMixed     bool
 	ObjIDs      []string
 	ObjTypes    []int
-	ForwardedBy int  
+	ForwardedBy int
 }
 
 type Reply struct {
@@ -60,14 +59,17 @@ func NewWocService() *WocService {
 // ===== RPC HANDLERS =====
 
 func (s *WocService) ConsensusService(args *Args, reply *Reply) error {
-	requestArrivalTime := time.Now() 
+	activeRPCs.Add(1)
+	defer activeRPCs.Add(-1)
+
+	requestArrivalTime := time.Now()
 	reply.ClientClock = args.ClientClock
-	
+
 	if latencyDebug {
 		log.Debugf("[LATENCY] ConsensusService called | ClientClock=%d | PrioClock=%d | Type=%d | BatchSize=%d | ArrivalTime=%v",
 			args.ClientClock, args.PrioClock, args.Type, len(args.CmdPlain), requestArrivalTime.UnixMilli())
 	}
-	
+
 	//processingStart := time.Now()
 	var err error
 	switch args.Type {
@@ -83,13 +85,13 @@ func (s *WocService) ConsensusService(args *Args, reply *Reply) error {
 	//processingTime := time.Since(processingStart)
 
 	totalLatency := time.Since(requestArrivalTime)
-	reply.Latency = totalLatency.Seconds() * 1000 
-	
+	reply.Latency = totalLatency.Seconds() * 1000
+
 	if latencyDebug {
-		log.Debugf("[LATENCY-BREAKDOWN] Full RPC processing=%vms (not in CSV)", 
+		log.Debugf("[LATENCY-BREAKDOWN] Full RPC processing=%vms (not in CSV)",
 			totalLatency.Milliseconds())
 	}
-	
+
 	if err != nil {
 		reply.ErrorMsg = err
 	}
@@ -101,19 +103,18 @@ func conJobPlainMsg(args *Args, reply *Reply) error {
 	isLeader := cm.mystate.IsLeader()
 	batchSize := len(args.CmdPlain)
 
-
 	if args.PrioVal > 0 {
 		if latencyDebug {
 			log.Debugf("[LATENCY] Follower voting (immediate response) | ClientClock=%d | PrioClock=%d | ObjID=%s",
 				args.ClientClock, args.PrioClock, args.ObjID)
 		}
-		
+
 		reply.PathUsed = "SLOW"
 		reply.LeaderClock = args.PrioClock
 		reply.Success = true
 		reply.Accepted = true
 		reply.ExeResult = time.Since(start).String()
-		
+
 		return nil
 	}
 
@@ -182,11 +183,11 @@ func conJobPlainMsg(args *Args, reply *Reply) error {
 		log.Debugf("[LATENCY] Leader processing batch | ClientClock=%d | BatchSize=%d | IsMixed=%v",
 			args.ClientClock, batchSize, args.IsMixed)
 	}
-	
+
 	// Analyze batch composition
 	batchAnalysisStart := time.Now()
 	fastCount, slowCount, hotCount := 0, 0, 0
-	
+
 	if args.IsMixed {
 		for i := 0; i < batchSize; i++ {
 			switch args.ObjTypes[i] {
@@ -211,7 +212,7 @@ func conJobPlainMsg(args *Args, reply *Reply) error {
 
 	needsSlowPath := (slowCount + hotCount) > 0
 	batchAnalysisTime := time.Since(batchAnalysisStart)
-	
+
 	if latencyDebug {
 		log.Debugf("[LATENCY] Batch analysis | ClientClock=%d | Fast=%d Slow=%d Hot=%d | AnalysisTime=%vμs",
 			args.ClientClock, fastCount, slowCount, hotCount, batchAnalysisTime.Microseconds())
@@ -225,7 +226,7 @@ func conJobPlainMsg(args *Args, reply *Reply) error {
 		ObjType:     args.ObjType,
 		CmdType:     args.CmdType,
 		Payload:     args.CmdPlain,
-		ForwardedBy: args.ForwardedBy, 
+		ForwardedBy: args.ForwardedBy,
 	}
 
 	if args.IsMixed && len(args.ObjIDs) > 0 && len(args.ObjTypes) > 0 {
@@ -241,25 +242,25 @@ func conJobPlainMsg(args *Args, reply *Reply) error {
 
 	processingStart := time.Now()
 	ok, path := cm.HandleCommand(cmd)
-	
+
 	processingTime := time.Since(processingStart)
 	totalTime := time.Since(start)
 	leaderTotalTime := time.Since(leaderProcessingStart)
-	
+
 	if latencyDebug {
 		log.Debugf("[LATENCY-BREAKDOWN] Path completed | ClientClock=%d | Path=%s | ConsensusProcessing=%vμs | BatchAnalysis=%vμs | Total=%vms",
-			args.ClientClock, path, processingTime.Microseconds(), 
+			args.ClientClock, path, processingTime.Microseconds(),
 			batchAnalysisTime.Microseconds(), totalTime.Milliseconds())
 	}
-	
+
 	reply.Success = ok
 	reply.PathUsed = path
 	reply.Accepted = ok
 	reply.LeaderClock = 0
 	reply.Latency = totalTime.Seconds() * 1000 // milliseconds
-	reply.ExeResult = fmt.Sprintf("Total:%vms|Processing:%vμs|LeaderTotal:%vms", 
+	reply.ExeResult = fmt.Sprintf("Total:%vms|Processing:%vμs|LeaderTotal:%vms",
 		totalTime.Milliseconds(), processingTime.Microseconds(), leaderTotalTime.Milliseconds())
-	
+
 	if !ok {
 		reply.ErrorMsg = fmt.Errorf("%s path consensus failed", path)
 	}
@@ -336,7 +337,7 @@ func conJobMongoDB(args *Args, reply *Reply) error {
 		reply.Success = true
 		reply.Accepted = true
 		reply.ExeResult = time.Since(start).String()
-		
+
 		return nil
 	}
 
@@ -363,15 +364,15 @@ func conJobMongoDB(args *Args, reply *Reply) error {
 				Payload:     args.CmdMongo,
 				ForwardedBy: -1,
 			}
-			
+
 			ok, pathUsed := cm.HandleCommand(cmd)
-			
+
 			reply.Success = ok
 			reply.PathUsed = pathUsed
 			reply.Accepted = ok
 			reply.LeaderClock = 0
 			reply.ExeResult = time.Since(start).String()
-			
+
 			if ok {
 				queries := append([]mongodb.Query(nil), args.CmdMongo...)
 				go func(clientClock int, asyncQueries []mongodb.Query) {
@@ -380,13 +381,13 @@ func conJobMongoDB(args *Args, reply *Reply) error {
 					}
 				}(args.ClientClock, queries)
 			}
-			
+
 			if !ok {
 				reply.ErrorMsg = fmt.Errorf("fast path MongoDB consensus failed")
 			}
 			return reply.ErrorMsg
 		}
-		
+
 		ok, pathUsed := cm.forwardToLeaderOptimized(args, reply)
 		followerLatency := time.Since(start)
 
@@ -468,10 +469,12 @@ func (s *WocService) Ping(args *PingArgs, reply *Reply) error {
 	return nil
 }
 
-
 // CreateObject is DEPRECATED - objects are pre-warmed at server startup
 // Kept for backward compatibility with old clients, but does nothing
-func (s *WocService) CreateObject(args *struct{ ObjID string; ObjType int }, reply *struct{ Success bool }) error {
+func (s *WocService) CreateObject(args *struct {
+	ObjID   string
+	ObjType int
+}, reply *struct{ Success bool }) error {
 	//  NO-OP: Objects already pre-warmed in main.go
 	// Just return success for backward compatibility
 	log.Debugf("[DEPRECATED] CreateObject called for %s - object already pre-warmed at startup", args.ObjID)
