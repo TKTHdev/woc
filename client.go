@@ -603,8 +603,8 @@ func RunClient(clientID int, configPath string, numOps int, indepRatio float64, 
 
 		// Save metrics
 		log.Infof("Client %d:  Saving metrics...", clientID)
-		fmt.Printf("Client %d:  Saving metrics (Fast=%d, Slow=%d, Conflicts=%d)...\n",
-			clientID, perfM.FastCommits, perfM.SlowCommits, perfM.ConflictCommits)
+		fmt.Printf("Client %d:  Saving metrics (Fast=%d, Slow=%d, Conflicts=%d, Errors=%d)...\n",
+			clientID, perfM.FastCommits, perfM.SlowCommits, perfM.ConflictCommits, perfM.ErrorCommits)
 
 		if err := perfM.SaveToFile(); err != nil {
 			log.Errorf("Client %d:  Failed to save metrics: %v", clientID, err)
@@ -893,9 +893,9 @@ func RunClient(clientID int, configPath string, numOps int, indepRatio float64, 
 
 				// Phase 2: Metrics recording
 				if err != nil {
-					atomic.AddInt64(&perfM.ConflictCommits, int64(batchSize))
+					perfM.AddErrorCommits(batchSize)
 					for b := 0; b < batchSize; b++ {
-						perfM.IncConflict(clockVal)
+						perfM.IncError(clockVal)
 					}
 					if clientLatencyDebug {
 						log.Debugf("[CLIENT-LATENCY] Batch %d | ERROR: %v", clockVal, err)
@@ -965,9 +965,9 @@ func RunClient(clientID int, configPath string, numOps int, indepRatio float64, 
 
 			metricsStart := time.Now()
 			if err != nil {
-				atomic.AddInt64(&perfM.ConflictCommits, int64(currentBatch))
+				perfM.AddErrorCommits(currentBatch)
 				for b := 0; b < currentBatch; b++ {
-					perfM.IncConflict(cmd.ClientClock)
+					perfM.IncError(cmd.ClientClock)
 				}
 				RecordBatch(currentBatch, 0, "ERROR", true)
 				RecordBatchTS(0, true)
