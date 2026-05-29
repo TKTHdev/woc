@@ -470,29 +470,11 @@ func startTimeSeriesRecorder(clientID int, intervalMs int) {
 }
 
 func RunClient(clientID int, configPath string, numOps int, indepRatio float64, commonRatio float64, batchMode string) {
-	pipelined := os.Getenv("PIPELINE_MODE") == "true"
-	maxInflight := 5 // default conservative
-	if val := os.Getenv("MAX_INFLIGHT"); val != "" {
-		if n, err := fmt.Sscanf(val, "%d", &maxInflight); err == nil && n == 1 && maxInflight > 0 {
-			// Explicit override from environment
-		} else {
-			maxInflight = 5
-		}
-	} else {
-		slowPathRatio := (float64(conflictrate) + commonRatio) / 100.0
-
-		if slowPathRatio >= 0.80 {
-			maxInflight = 3
-			log.Infof("Client %d: SLOW workload (%.0f%% slow) → MAX_INFLIGHT=%d (conservative for serialized server)",
-				clientID, slowPathRatio*100, maxInflight)
-		} else if slowPathRatio >= 0.30 {
-			maxInflight = 8 // Reduced from 12 for cloud stability
-			log.Infof("Client %d: MIXED workload (%.0f%% slow) → MAX_INFLIGHT=%d (moderate)",
-				clientID, slowPathRatio*100, maxInflight)
-		} else {
-			log.Infof("Client %d: FAST workload (%.0f%% slow) → MAX_INFLIGHT=%d (cloud-optimized, tunable via MAX_INFLIGHT env)",
-				clientID, slowPathRatio*100, maxInflight)
-		}
+	pipelined := pipelineMode
+	effectiveMaxInflight := maxInflight
+	if effectiveMaxInflight < 1 {
+		log.Warnf("Client %d: invalid -maxinflight=%d; using 1", clientID, effectiveMaxInflight)
+		effectiveMaxInflight = 1
 	}
 
 	var shuttingDown atomic.Bool
@@ -507,20 +489,20 @@ func RunClient(clientID int, configPath string, numOps int, indepRatio float64, 
 		noLimiter := os.Getenv("NO_LIMITER") == "true" // Localhost bypass
 
 		if noLimiter {
-			limiter = NewNoOpLimiter(maxInflight, clientID)
+			limiter = NewNoOpLimiter(effectiveMaxInflight, clientID)
 			log.Infof("Client %d: PIPELINED mode with NO LIMITER (localhost only - zero overhead)", clientID)
 		} else if useSimple {
-			limiter = NewSimpleLimiter(maxInflight, clientID)
+			limiter = NewSimpleLimiter(effectiveMaxInflight, clientID)
 			log.Infof("Client %d: PIPELINED mode with SimpleLimiter (lock-free, max %d concurrent batches)",
-				clientID, maxInflight)
+				clientID, effectiveMaxInflight)
 		} else if useAdaptive {
-			limiter = NewAdaptiveLimiter(maxInflight, clientID)
+			limiter = NewAdaptiveLimiter(effectiveMaxInflight, clientID)
 			log.Infof("Client %d: PIPELINED mode with AdaptiveLimiter (adaptive, max %d concurrent batches)",
-				clientID, maxInflight)
+				clientID, effectiveMaxInflight)
 		} else {
-			limiter = NewChannelLimiter(maxInflight, clientID)
+			limiter = NewChannelLimiter(effectiveMaxInflight, clientID)
 			log.Infof("Client %d: PIPELINED mode with ChannelLimiter (non-blocking, max %d concurrent batches)",
-				clientID, maxInflight)
+				clientID, effectiveMaxInflight)
 		}
 	} else {
 		log.Infof("Client %d: SEQUENTIAL mode enabled (ordered batches)", clientID)
