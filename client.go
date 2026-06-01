@@ -365,6 +365,7 @@ func recordBatchMetrics(reply *Reply, clockVal int, batchSize int) {
 			perfM.IncSlowPath(clockVal)
 		}
 		for i := 0; i < hotOps && i < batchSize; i++ {
+			perfM.IncSlowPath(clockVal)
 			perfM.IncConflict(clockVal)
 		}
 	} else if len(reply.PathUsed) >= 3 && reply.PathUsed[:3] == "HOT" {
@@ -373,6 +374,7 @@ func recordBatchMetrics(reply *Reply, clockVal int, batchSize int) {
 		atomic.AddInt64(&perfM.SlowCommits, int64(hotOps))
 		atomic.AddInt64(&perfM.ConflictCommits, int64(hotOps))
 		for i := 0; i < hotOps && i < batchSize; i++ {
+			perfM.IncSlowPath(clockVal)
 			perfM.IncConflict(clockVal)
 		}
 	} else {

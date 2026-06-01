@@ -23,6 +23,7 @@ BATCHSIZE=1
 PIPELINE_MODE=true
 MONGO_CLIENT_POOL=16
 LOG_LEVEL="info"
+CONFLICT_RATE=0
 
 # 5-Node Cluster: 2 Strong (c32) + 2 Medium + 1 Weak (c8)
 SERVER_IPS=(
@@ -118,6 +119,7 @@ echo "SSH user:   ${SSH_USER}"
 echo "SSH key:    ${SSH_KEY}"
 echo "Test cases: ${#TEST_CASES[@]}"
 echo "Runtime per test: ${RUNTIME}s"
+echo "Conflict rate: ${CONFLICT_RATE}%"
 echo ""
 
 remote_exec() {
@@ -224,14 +226,14 @@ start_workload_nodes() {
     echo "  Starting WOC servers..."
     for i in "${!SERVER_IPS[@]}"; do
         ip="${SERVER_IPS[$i]}"
-        remote_exec "$ip" "pkill -x woc 2>/dev/null || true; cd '$REMOTE_DIR'; nohup '$REMOTE_DIR/$BINARY' -id=$i -path='$CONFIG_PATH' -et=1 -n=$NUM_SERVERS -t=$THRESHOLD -b=$BATCHSIZE -mode=1 -mcli=$MONGO_CLIENT_POOL -mload='$WORKLOAD' -bcomp=object-specific -indep=$indep -common=$common -pipeline=$PIPELINE_MODE -log=$LOG_LEVEL -ep=true -role=0 > '$LOG_DIR/server_${i}_indep_${indep}_common_${common}.log' 2>&1 &"
+        remote_exec "$ip" "pkill -x woc 2>/dev/null || true; cd '$REMOTE_DIR'; nohup '$REMOTE_DIR/$BINARY' -id=$i -path='$CONFIG_PATH' -et=1 -n=$NUM_SERVERS -t=$THRESHOLD -b=$BATCHSIZE -mode=1 -mcli=$MONGO_CLIENT_POOL -mload='$WORKLOAD' -bcomp=object-specific -indep=$indep -common=$common -conflictrate=$CONFLICT_RATE -pipeline=$PIPELINE_MODE -log=$LOG_LEVEL -ep=true -role=0 > '$LOG_DIR/server_${i}_indep_${indep}_common_${common}.log' 2>&1 &"
     done
 
     echo "  Starting WOC clients..."
     for i in "${!CLIENT_HOST_IPS[@]}"; do
         ip="${CLIENT_HOST_IPS[$i]}"
         client_id=$((NUM_SERVERS + i))
-        remote_exec "$ip" "pkill -x woc 2>/dev/null || true; cd '$REMOTE_DIR'; nohup '$REMOTE_DIR/$BINARY' -id=$client_id -path='$CONFIG_PATH' -et=1 -n=$NUM_SERVERS -t=$THRESHOLD -b=$BATCHSIZE -mode=1 -mload='$WORKLOAD' -bcomp=object-specific -indep=$indep -common=$common -pipeline=$PIPELINE_MODE -log=$LOG_LEVEL -ops=0 -role=1 > '$LOG_DIR/client_${i}_indep_${indep}_common_${common}.log' 2>&1 &"
+        remote_exec "$ip" "pkill -x woc 2>/dev/null || true; cd '$REMOTE_DIR'; nohup '$REMOTE_DIR/$BINARY' -id=$client_id -path='$CONFIG_PATH' -et=1 -n=$NUM_SERVERS -t=$THRESHOLD -b=$BATCHSIZE -mode=1 -mload='$WORKLOAD' -bcomp=object-specific -indep=$indep -common=$common -conflictrate=$CONFLICT_RATE -pipeline=$PIPELINE_MODE -log=$LOG_LEVEL -ops=0 -role=1 > '$LOG_DIR/client_${i}_indep_${indep}_common_${common}.log' 2>&1 &"
     done
 }
 
