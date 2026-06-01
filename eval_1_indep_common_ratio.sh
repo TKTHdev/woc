@@ -7,48 +7,96 @@
 
 set -u
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cd "$SCRIPT_DIR"
-
-USER="ubuntu"
-SSH_KEY="/home/ubuntu/.ssh/tani.pem"
+SSH_USER="${SSH_USER:-ubuntu}"
+SSH_KEY="${SSH_KEY:-${HOME}/.ssh/tani.pem}"
+CONTROLLER="${CONTROLLER:-auto}"
 REMOTE_DIR="/home/ubuntu/woc"
 BINARY="woc"
 CONFIG_PATH="${REMOTE_DIR}/config/cluster_hetero_5n_2s3w.conf"
 LOG_DIR="${REMOTE_DIR}/logs"
 EVAL_DIR="${REMOTE_DIR}/eval"
-MERGE_SCRIPT="${SCRIPT_DIR}/merge_eval.py"
-RESULT_ROOT="${SCRIPT_DIR}/results/eval1_indep_common_ratio"
-RUN_TS="$(date +%Y%m%d_%H%M%S)"
-RUN_DIR="${RESULT_ROOT}/${RUN_TS}"
 RUNTIME=30  # 30 seconds per test
 NUM_SERVERS=5
 NUM_CLIENTS=2
 THRESHOLD=1
 BATCHSIZE=1
 PIPELINE_MODE=true
-MAX_INFLIGHT=5
 MONGO_CLIENT_POOL=16
 LOG_LEVEL="info"
 
-# 5-Node Cluster: 2 Strong (c16) + 3 Weak (c4)
+# 5-Node Cluster: 2 Strong (c32) + 2 Medium + 1 Weak (c8)
 SERVER_IPS=(
-"192.168.73.159"
-"192.168.73.84"
-"192.168.73.69"
-"192.168.73.235"
-"192.168.73.194"
+"192.168.73.93"
+"192.168.73.107"
+"192.168.73.79"
+"192.168.73.183"
+"192.168.73.211"
 )
 
 CLIENT_HOST_IPS=(
-"192.168.73.218"
-"192.168.73.219"
+"192.168.73.11"
+"192.168.73.234"
 )
 
 WORKLOAD="a"
-SSH_OPTS=(-i "$SSH_KEY" -o BatchMode=yes -o ConnectTimeout=10)
 
-mkdir -p "$RUN_DIR"
+# Bastion: cora-c32-1 (internal 192.168.73.93 / public 134.87.11.79).
+# CONTROLLER=laptop: internal IPs are reached through it via ProxyCommand.
+# CONTROLLER=bastion: run this script on the bastion and use internal IPs directly.
+BASTION_PUBLIC_IP="134.87.11.79"
+BASTION_INTERNAL_IP="192.168.73.93"
+
+detect_controller_mode() {
+    case "$CONTROLLER" in
+        laptop|bastion)
+            echo "$CONTROLLER"
+            ;;
+        auto)
+            local ips
+            ips="$(hostname -I 2>/dev/null || true)"
+            if [[ " ${ips} " == *" ${BASTION_INTERNAL_IP} "* ]]; then
+                echo "bastion"
+            else
+                echo "laptop"
+            fi
+            ;;
+        *)
+            echo "ERROR: CONTROLLER must be auto, laptop, or bastion (got: $CONTROLLER)" >&2
+            exit 1
+            ;;
+    esac
+}
+
+CONTROLLER_MODE="$(detect_controller_mode)"
+
+if [ ! -f "$SSH_KEY" ]; then
+    echo "ERROR: SSH key not found: $SSH_KEY" >&2
+    echo "Set SSH_KEY=/path/to/key if it is stored elsewhere." >&2
+    exit 1
+fi
+
+SSH_BASE_OPTS=(-i "$SSH_KEY" -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new -o ServerAliveInterval=15 -o ServerAliveCountMax=8)
+PROXY_CMD="ssh -i '$SSH_KEY' -o BatchMode=yes -o StrictHostKeyChecking=accept-new -W %h:%p ${SSH_USER}@${BASTION_PUBLIC_IP}"
+
+# Resolve SSH options + target for a given host.
+# Sets SSH_OPTS, SSH_TARGET, and SSH_IS_LOCAL.
+ssh_opts_for() {
+    local host=$1
+    SSH_OPTS=("${SSH_BASE_OPTS[@]}")
+    SSH_IS_LOCAL=false
+
+    if [ "$CONTROLLER_MODE" = "bastion" ] && [ "$host" = "$BASTION_INTERNAL_IP" ]; then
+        SSH_IS_LOCAL=true
+        SSH_TARGET="localhost"
+    elif [ "$CONTROLLER_MODE" = "bastion" ]; then
+        SSH_TARGET="$host"
+    elif [ "$host" = "$BASTION_INTERNAL_IP" ]; then
+        SSH_TARGET="$BASTION_PUBLIC_IP"
+    else
+        SSH_OPTS+=(-o "ProxyCommand=$PROXY_CMD")
+        SSH_TARGET="$host"
+    fi
+}
 
 # Test cases: INDEP_RATIO/COMMON_RATIO pairs
 TEST_CASES=(
@@ -65,6 +113,9 @@ TEST_CASES=(
 echo "=============================================="
 echo "EVAL 1: Independent vs Common Ratio"
 echo "=============================================="
+echo "Controller: ${CONTROLLER_MODE}"
+echo "SSH user:   ${SSH_USER}"
+echo "SSH key:    ${SSH_KEY}"
 echo "Test cases: ${#TEST_CASES[@]}"
 echo "Runtime per test: ${RUNTIME}s"
 echo ""
@@ -72,7 +123,32 @@ echo ""
 remote_exec() {
     local host=$1
     shift
-    ssh "${SSH_OPTS[@]}" "$USER@$host" "$*"
+    ssh_opts_for "$host"
+    if [ "$SSH_IS_LOCAL" = true ]; then
+        bash -lc "$*"
+    else
+        ssh "${SSH_OPTS[@]}" "$SSH_USER@$SSH_TARGET" "$*"
+    fi
+}
+
+copy_file_to_host() {
+    local src=$1
+    local host=$2
+    local dest_dir=$3
+
+    ssh_opts_for "$host"
+    if [ "$SSH_IS_LOCAL" = true ]; then
+        mkdir -p "$dest_dir"
+        local src_abs
+        local dest_abs
+        src_abs="$(cd "$(dirname "$src")" && pwd -P)/$(basename "$src")"
+        dest_abs="$(cd "$dest_dir" && pwd -P)/$(basename "$src")"
+        if [ "$src_abs" != "$dest_abs" ]; then
+            cp "$src" "$dest_abs"
+        fi
+    else
+        scp "${SSH_OPTS[@]}" "$src" "$SSH_USER@$SSH_TARGET:$dest_dir/" 2>/dev/null
+    fi
 }
 
 create_remote_dirs() {
@@ -104,7 +180,7 @@ start_mongo_cluster() {
     echo "  Starting MongoDB on all servers..."
     for i in "${!SERVER_IPS[@]}"; do
         ip="${SERVER_IPS[$i]}"
-        remote_exec "$ip" "pkill -f mongod 2>/dev/null || true; rm -f '$REMOTE_DIR/mongodb_data/mongod.lock' '$REMOTE_DIR/mongodb_data/WiredTiger.lock' '$LOG_DIR/mongod.log' 2>/dev/null || true; mkdir -p '$REMOTE_DIR/mongodb_data' '$LOG_DIR'; nohup mongod --port 27017 --replSet wocrs --dbpath '$REMOTE_DIR/mongodb_data' --bind_ip 0.0.0.0 --logpath '$LOG_DIR/mongod.log' --logappend > '$LOG_DIR/mongod.out' 2>&1 &"
+        remote_exec "$ip" "pkill -x mongod 2>/dev/null || true; for _ in \$(seq 1 20); do ss -ltn 2>/dev/null | grep -q ':27017 ' || break; sleep 1; done; rm -f '$REMOTE_DIR/mongodb_data/mongod.lock' '$REMOTE_DIR/mongodb_data/WiredTiger.lock' '$LOG_DIR/mongod.log' 2>/dev/null || true; mkdir -p '$REMOTE_DIR/mongodb_data' '$LOG_DIR'; nohup mongod --port 27017 --replSet wocrs --dbpath '$REMOTE_DIR/mongodb_data' --bind_ip 0.0.0.0 --logpath '$LOG_DIR/mongod.log' --logappend > '$LOG_DIR/mongod.out' 2>&1 &"
     done
 
     for i in "${!SERVER_IPS[@]}"; do
@@ -133,54 +209,12 @@ build_and_distribute() {
     
     echo "  Distributing to all nodes..."
     for ip in "${SERVER_IPS[@]}" "${CLIENT_HOST_IPS[@]}"; do
-        scp "${SSH_OPTS[@]}" "$BINARY" "$USER@$ip:$REMOTE_DIR/" 2>/dev/null &
+        (
+            copy_file_to_host "$BINARY" "$ip" "$REMOTE_DIR"
+        ) &
     done
     wait
     echo "  ✓ Distribution complete"
-}
-
-archive_case() {
-    local label=$1
-    shift
-    local case_dir="${RUN_DIR}/${label}"
-    mkdir -p "$case_dir"
-
-    local idx=0
-    local host
-    for host in "$@"; do
-        local node_dir="${case_dir}/node_${idx}"
-        mkdir -p "$node_dir"
-        scp -q -o BatchMode=yes -o ConnectTimeout=10 -i "$SSH_KEY" -r \
-            "$USER@$host:${EVAL_DIR}/" "$node_dir/" 2>/dev/null || true
-        scp -q -o BatchMode=yes -o ConnectTimeout=10 -i "$SSH_KEY" -r \
-            "$USER@$host:${LOG_DIR}/" "$node_dir/" 2>/dev/null || true
-        idx=$((idx + 1))
-    done
-}
-
-merge_case_results() {
-    local label=$1
-    local case_dir="${RUN_DIR}/${label}"
-    local case_eval_dir="${case_dir}/eval"
-    local case_merged_dir="${case_dir}/merged"
-    local client_start_id=$NUM_SERVERS
-    local client_end_id=$((NUM_SERVERS + NUM_CLIENTS - 1))
-    local client_id_filter="${client_start_id}-${client_end_id}"
-    local server_id_filter="0-$((NUM_SERVERS - 1))"
-
-    mkdir -p "$case_eval_dir" "$case_merged_dir"
-
-    for node_dir in "${case_dir}"/node_*; do
-        [ -d "$node_dir/eval" ] || continue
-        cp -r "$node_dir/eval/"* "$case_eval_dir/" 2>/dev/null || true
-    done
-
-    if [ -f "$MERGE_SCRIPT" ]; then
-        python3 "$MERGE_SCRIPT" "$case_eval_dir" "$case_merged_dir/" --ids "$client_id_filter"
-        python3 "$MERGE_SCRIPT" "$case_eval_dir" "$case_merged_dir/" --servers --ids "$server_id_filter"
-    else
-        echo "  Warning: merge_eval.py not found at $MERGE_SCRIPT"
-    fi
 }
 
 start_workload_nodes() {
@@ -190,14 +224,14 @@ start_workload_nodes() {
     echo "  Starting WOC servers..."
     for i in "${!SERVER_IPS[@]}"; do
         ip="${SERVER_IPS[$i]}"
-        remote_exec "$ip" "pkill -f 'woc.*-path' 2>/dev/null || true; nohup '$REMOTE_DIR/$BINARY' -id=$i -path='$CONFIG_PATH' -et=1 -n=$NUM_SERVERS -t=$THRESHOLD -b=$BATCHSIZE -mode=1 -mcli=$MONGO_CLIENT_POOL -mload='$WORKLOAD' -bcomp=object-specific -indep=$indep -common=$common -pipeline=$PIPELINE_MODE -maxinflight=$MAX_INFLIGHT -log=$LOG_LEVEL -ep=true -role=0 > '$LOG_DIR/server_${i}_indep_${indep}_common_${common}.log' 2>&1 &"
+        remote_exec "$ip" "pkill -x woc 2>/dev/null || true; cd '$REMOTE_DIR'; nohup '$REMOTE_DIR/$BINARY' -id=$i -path='$CONFIG_PATH' -et=1 -n=$NUM_SERVERS -t=$THRESHOLD -b=$BATCHSIZE -mode=1 -mcli=$MONGO_CLIENT_POOL -mload='$WORKLOAD' -bcomp=object-specific -indep=$indep -common=$common -pipeline=$PIPELINE_MODE -log=$LOG_LEVEL -ep=true -role=0 > '$LOG_DIR/server_${i}_indep_${indep}_common_${common}.log' 2>&1 &"
     done
 
     echo "  Starting WOC clients..."
     for i in "${!CLIENT_HOST_IPS[@]}"; do
         ip="${CLIENT_HOST_IPS[$i]}"
         client_id=$((NUM_SERVERS + i))
-        remote_exec "$ip" "pkill -f 'woc.*-path' 2>/dev/null || true; nohup '$REMOTE_DIR/$BINARY' -id=$client_id -path='$CONFIG_PATH' -et=1 -n=$NUM_SERVERS -t=$THRESHOLD -b=$BATCHSIZE -mode=1 -mload='$WORKLOAD' -bcomp=object-specific -indep=$indep -common=$common -pipeline=$PIPELINE_MODE -maxinflight=$MAX_INFLIGHT -log=$LOG_LEVEL -ops=0 -role=1 > '$LOG_DIR/client_${i}_indep_${indep}_common_${common}.log' 2>&1 &"
+        remote_exec "$ip" "pkill -x woc 2>/dev/null || true; cd '$REMOTE_DIR'; nohup '$REMOTE_DIR/$BINARY' -id=$client_id -path='$CONFIG_PATH' -et=1 -n=$NUM_SERVERS -t=$THRESHOLD -b=$BATCHSIZE -mode=1 -mload='$WORKLOAD' -bcomp=object-specific -indep=$indep -common=$common -pipeline=$PIPELINE_MODE -log=$LOG_LEVEL -ops=0 -role=1 > '$LOG_DIR/client_${i}_indep_${indep}_common_${common}.log' 2>&1 &"
     done
 }
 
@@ -214,7 +248,7 @@ stop_workload_nodes() {
 cleanup() {
     stop_workload_nodes || true
     for ip in "${SERVER_IPS[@]}"; do
-        remote_exec "$ip" "pkill -f mongod 2>/dev/null || true" || true
+        remote_exec "$ip" "pkill -x mongod 2>/dev/null || true" || true
     done
 }
 
@@ -224,7 +258,6 @@ start_cluster() {
     local indep=$1
     local common=$2
     local test_num=$3
-    local label="indep_${indep}_common_${common}"
     
     echo ""
     echo "--- Test $test_num: INDEP=$indep, COMMON=$common ---"
@@ -238,10 +271,6 @@ start_cluster() {
     echo "  Stopping workload processes..."
     stop_workload_nodes
     sleep 2
-
-    echo "  Archiving results..."
-    archive_case "$label" "${SERVER_IPS[@]}" "${CLIENT_HOST_IPS[@]}"
-    merge_case_results "$label"
 }
 
 # Run tests
@@ -263,6 +292,16 @@ echo "=============================================="
 echo "✓ EVAL 1 COMPLETE"
 echo "=============================================="
 echo ""
-echo "Results archived in: $RUN_DIR"
+echo "Results stored in:"
+echo "  Server logs: $LOG_DIR/server_*_indep_*_common_*.log"
+echo "  Client logs: $LOG_DIR/client_*_indep_*_common_*.log"
+echo "  Eval data:   $EVAL_DIR/test_*.csv"
 echo ""
-echo "Merged client/server summaries are under: $RUN_DIR/*/merged/"
+echo "Retrieve results with:"
+if [ "$CONTROLLER_MODE" = "bastion" ]; then
+    echo "  ls -lah $EVAL_DIR/"
+    echo "  bash retrieve_eval1.sh"
+else
+    echo "  ssh -i $SSH_KEY $SSH_USER@$BASTION_PUBLIC_IP 'ls -lah $EVAL_DIR/'"
+    echo "  bash retrieve_eval1.sh"
+fi

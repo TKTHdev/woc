@@ -10,8 +10,9 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
-USER="ubuntu"
-SSH_KEY="/home/ubuntu/.ssh/tani.pem"
+SSH_USER="${SSH_USER:-ubuntu}"
+SSH_KEY="${SSH_KEY:-${HOME}/.ssh/tani.pem}"
+CONTROLLER="${CONTROLLER:-auto}"
 REMOTE_DIR="/home/ubuntu/woc"
 REMOTE_WORKDATA_DIR="${REMOTE_DIR}/ycsb/workData"
 BINARY="woc"
@@ -37,27 +38,79 @@ COMMON_RATIO=10.0
 
 WORKLOADS=(a b c d e f)
 
-# 5-Node Cluster: 2 Strong (c16) + 3 Weak (c4)
+# 5-Server Cluster: 2 strong (c32) + 2 medium (c8) + 1 weak (c8); 2 clients (c4)
 SERVER_IPS=(
-"192.168.73.159"
-"192.168.73.84"
-"192.168.73.69"
-"192.168.73.235"
-"192.168.73.194"
+"192.168.73.93"    # cora-c32-1  strong
+"192.168.73.107"   # cora-c32-2  strong
+"192.168.73.79"    # cora-c8-1   medium
+"192.168.73.183"   # cora-c8-2   medium
+"192.168.73.211"   # cora-c8-3   weak
 )
 
 CLIENT_HOST_IPS=(
-"192.168.73.218"
-"192.168.73.219"
+"192.168.73.11"    # cora-c4-4
+"192.168.73.234"   # cora-c4-3
 )
 
-SSH_OPTS=(-i "$SSH_KEY" -o BatchMode=yes -o ConnectTimeout=10)
+BASTION_PUBLIC_IP="134.87.11.79"
+BASTION_INTERNAL_IP="192.168.73.93"
+
+detect_controller_mode() {
+    case "$CONTROLLER" in
+        laptop|bastion) echo "$CONTROLLER" ;;
+        auto)
+            local ips
+            ips="$(hostname -I 2>/dev/null || true)"
+            if [[ " ${ips} " == *" ${BASTION_INTERNAL_IP} "* ]]; then
+                echo "bastion"
+            else
+                echo "laptop"
+            fi
+            ;;
+        *)
+            echo "ERROR: CONTROLLER must be auto, laptop, or bastion (got: $CONTROLLER)" >&2
+            exit 1
+            ;;
+    esac
+}
+
+CONTROLLER_MODE="$(detect_controller_mode)"
+
+if [ ! -f "$SSH_KEY" ]; then
+    echo "ERROR: SSH key not found: $SSH_KEY" >&2
+    echo "Set SSH_KEY=/path/to/key if it is stored elsewhere." >&2
+    exit 1
+fi
+
+SSH_BASE_OPTS=(-i "$SSH_KEY" -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new)
+PROXY_CMD="ssh -i '$SSH_KEY' -o BatchMode=yes -o StrictHostKeyChecking=accept-new -W %h:%p ${SSH_USER}@${BASTION_PUBLIC_IP}"
+
+ssh_opts_for() {
+    local host=$1
+    SSH_OPTS=("${SSH_BASE_OPTS[@]}")
+    SSH_IS_LOCAL=false
+
+    if [ "$CONTROLLER_MODE" = "bastion" ] && [ "$host" = "$BASTION_INTERNAL_IP" ]; then
+        SSH_IS_LOCAL=true
+        SSH_TARGET="localhost"
+    elif [ "$CONTROLLER_MODE" = "bastion" ]; then
+        SSH_TARGET="$host"
+    elif [ "$host" = "$BASTION_INTERNAL_IP" ]; then
+        SSH_TARGET="$BASTION_PUBLIC_IP"
+    else
+        SSH_OPTS+=(-o "ProxyCommand=$PROXY_CMD")
+        SSH_TARGET="$host"
+    fi
+}
 
 mkdir -p "$RUN_DIR"
 
 echo "=============================================="
 echo "EVAL 5: MongoDB Workload Sweep"
 echo "=============================================="
+echo "Controller: ${CONTROLLER_MODE}"
+echo "SSH user:   ${SSH_USER}"
+echo "SSH key:    ${SSH_KEY}"
 echo "Workloads: ${WORKLOADS[*]}"
 echo "Runtime per workload: ${RUNTIME}s"
 echo ""
@@ -65,7 +118,46 @@ echo ""
 remote_exec() {
     local host=$1
     shift
-    ssh "${SSH_OPTS[@]}" "$USER@$host" "$*"
+    ssh_opts_for "$host"
+    if [ "$SSH_IS_LOCAL" = true ]; then
+        bash -lc "$*"
+    else
+        ssh "${SSH_OPTS[@]}" "$SSH_USER@$SSH_TARGET" "$*"
+    fi
+}
+
+copy_file_to_host() {
+    local src=$1
+    local host=$2
+    local dest_dir=$3
+
+    ssh_opts_for "$host"
+    if [ "$SSH_IS_LOCAL" = true ]; then
+        mkdir -p "$dest_dir"
+        local src_abs
+        local dest_abs
+        src_abs="$(cd "$(dirname "$src")" && pwd -P)/$(basename "$src")"
+        dest_abs="$(cd "$dest_dir" && pwd -P)/$(basename "$src")"
+        if [ "$src_abs" != "$dest_abs" ]; then
+            cp "$src" "$dest_abs"
+        fi
+    else
+        scp -q "${SSH_OPTS[@]}" "$src" "$SSH_USER@$SSH_TARGET:$dest_dir/"
+    fi
+}
+
+copy_path_from_host() {
+    local host=$1
+    local remote_path=$2
+    local local_dir=$3
+
+    mkdir -p "$local_dir"
+    ssh_opts_for "$host"
+    if [ "$SSH_IS_LOCAL" = true ]; then
+        cp -r "$remote_path" "$local_dir/" 2>/dev/null || true
+    else
+        scp -q "${SSH_OPTS[@]}" -r "$SSH_USER@$SSH_TARGET:${remote_path}/" "$local_dir/" 2>/dev/null || true
+    fi
 }
 
 create_remote_dirs() {
@@ -89,7 +181,7 @@ distribute_workload_files() {
     for workload in "${WORKLOADS[@]}"; do
         local local_file="${SCRIPT_DIR}/ycsb/workData/run_workload${workload}.dat"
         for ip in "${SERVER_IPS[@]}" "${CLIENT_HOST_IPS[@]}"; do
-            scp -q -o BatchMode=yes -o ConnectTimeout=10 -i "$SSH_KEY" "$local_file" "$USER@$ip:$REMOTE_WORKDATA_DIR/"
+            copy_file_to_host "$local_file" "$ip" "$REMOTE_WORKDATA_DIR"
         done
     done
 }
@@ -128,7 +220,7 @@ start_mongo_cluster() {
     echo "  Starting MongoDB on all servers..."
     for i in "${!SERVER_IPS[@]}"; do
         ip="${SERVER_IPS[$i]}"
-        remote_exec "$ip" "pkill -f mongod 2>/dev/null || true; rm -f '$REMOTE_DIR/mongodb_data/mongod.lock' '$REMOTE_DIR/mongodb_data/WiredTiger.lock' '$LOG_DIR/mongod.log' 2>/dev/null || true; mkdir -p '$REMOTE_DIR/mongodb_data' '$LOG_DIR'; nohup mongod --port 27017 --replSet wocrs --dbpath '$REMOTE_DIR/mongodb_data' --bind_ip 0.0.0.0 --logpath '$LOG_DIR/mongod.log' --logappend > '$LOG_DIR/mongod.out' 2>&1 &"
+        remote_exec "$ip" "pkill -x mongod 2>/dev/null || true; rm -f '$REMOTE_DIR/mongodb_data/mongod.lock' '$REMOTE_DIR/mongodb_data/WiredTiger.lock' '$LOG_DIR/mongod.log' 2>/dev/null || true; mkdir -p '$REMOTE_DIR/mongodb_data' '$LOG_DIR'; nohup mongod --port 27017 --replSet wocrs --dbpath '$REMOTE_DIR/mongodb_data' --bind_ip 0.0.0.0 --logpath '$LOG_DIR/mongod.log' --logappend > '$LOG_DIR/mongod.out' 2>&1 &"
     done
 
     for i in "${!SERVER_IPS[@]}"; do
@@ -157,8 +249,8 @@ build_and_distribute() {
 
     echo "  Distributing binary and config to all nodes..."
     for ip in "${SERVER_IPS[@]}" "${CLIENT_HOST_IPS[@]}"; do
-        scp -q -o BatchMode=yes -o ConnectTimeout=10 -i "$SSH_KEY" "$BINARY" "$USER@$ip:$REMOTE_DIR/"
-        scp -q -o BatchMode=yes -o ConnectTimeout=10 -i "$SSH_KEY" "$CONFIG_PATH" "$USER@$ip:$REMOTE_DIR/config/"
+        copy_file_to_host "$BINARY" "$ip" "$REMOTE_DIR"
+        copy_file_to_host "${SCRIPT_DIR}/config/cluster_hetero_5n_2s3w.conf" "$ip" "$REMOTE_DIR/config"
     done
 }
 
@@ -173,10 +265,8 @@ archive_case() {
     for host in "$@"; do
         local node_dir="${case_dir}/node_${idx}"
         mkdir -p "$node_dir"
-        scp -q -o BatchMode=yes -o ConnectTimeout=10 -i "$SSH_KEY" -r \
-            "$USER@$host:${EVAL_DIR}/" "$node_dir/" 2>/dev/null || true
-        scp -q -o BatchMode=yes -o ConnectTimeout=10 -i "$SSH_KEY" -r \
-            "$USER@$host:${LOG_DIR}/" "$node_dir/" 2>/dev/null || true
+        copy_path_from_host "$host" "$EVAL_DIR" "$node_dir"
+        copy_path_from_host "$host" "$LOG_DIR" "$node_dir"
         idx=$((idx + 1))
     done
 }
@@ -212,14 +302,14 @@ start_workload_nodes() {
     echo "  Starting WOC servers for workload ${workload}..."
     for i in "${!SERVER_IPS[@]}"; do
         ip="${SERVER_IPS[$i]}"
-        remote_exec "$ip" "pkill -f 'woc.*-path' 2>/dev/null || true; nohup '$REMOTE_DIR/$BINARY' -id=$i -path='$CONFIG_PATH' -et=1 -n=$NUM_SERVERS -t=$THRESHOLD -b=$BATCHSIZE -mode=1 -mcli=$MONGO_CLIENT_POOL -mload=$workload -bcomp=object-specific -indep=$INDEP_RATIO -common=$COMMON_RATIO -pipeline=$PIPELINE_MODE -maxinflight=$MAX_INFLIGHT -log=$LOG_LEVEL -ep=true -role=0 > '$LOG_DIR/server_${i}_workload_${workload}.log' 2>&1 &"
+        remote_exec "$ip" "pkill -x woc 2>/dev/null || true; cd '$REMOTE_DIR'; nohup '$REMOTE_DIR/$BINARY' -id=$i -path='$CONFIG_PATH' -et=1 -n=$NUM_SERVERS -t=$THRESHOLD -b=$BATCHSIZE -mode=1 -mcli=$MONGO_CLIENT_POOL -mload=$workload -bcomp=object-specific -indep=$INDEP_RATIO -common=$COMMON_RATIO -pipeline=$PIPELINE_MODE -maxinflight=$MAX_INFLIGHT -log=$LOG_LEVEL -ep=true -role=0 > '$LOG_DIR/server_${i}_workload_${workload}.log' 2>&1 &"
     done
 
     echo "  Starting WOC clients for workload ${workload}..."
     for i in "${!CLIENT_HOST_IPS[@]}"; do
         ip="${CLIENT_HOST_IPS[$i]}"
         client_id=$((NUM_SERVERS + i))
-        remote_exec "$ip" "pkill -f 'woc.*-path' 2>/dev/null || true; nohup '$REMOTE_DIR/$BINARY' -id=$client_id -path='$CONFIG_PATH' -et=1 -n=$NUM_SERVERS -t=$THRESHOLD -b=$BATCHSIZE -mode=1 -mload=$workload -bcomp=object-specific -indep=$INDEP_RATIO -common=$COMMON_RATIO -pipeline=$PIPELINE_MODE -maxinflight=$MAX_INFLIGHT -log=$LOG_LEVEL -ops=0 -role=1 > '$LOG_DIR/client_${i}_workload_${workload}.log' 2>&1 &"
+        remote_exec "$ip" "pkill -x woc 2>/dev/null || true; cd '$REMOTE_DIR'; nohup '$REMOTE_DIR/$BINARY' -id=$client_id -path='$CONFIG_PATH' -et=1 -n=$NUM_SERVERS -t=$THRESHOLD -b=$BATCHSIZE -mode=1 -mload=$workload -bcomp=object-specific -indep=$INDEP_RATIO -common=$COMMON_RATIO -pipeline=$PIPELINE_MODE -maxinflight=$MAX_INFLIGHT -log=$LOG_LEVEL -ops=0 -role=1 > '$LOG_DIR/client_${i}_workload_${workload}.log' 2>&1 &"
     done
 }
 
@@ -236,7 +326,7 @@ stop_workload_nodes() {
 cleanup() {
     stop_workload_nodes || true
     for ip in "${SERVER_IPS[@]}"; do
-        remote_exec "$ip" "pkill -f mongod 2>/dev/null || true" || true
+        remote_exec "$ip" "pkill -x mongod 2>/dev/null || true" || true
     done
 }
 

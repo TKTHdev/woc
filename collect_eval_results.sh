@@ -6,10 +6,86 @@
 
 set -u
 
-USER="ubuntu"
-SSH_KEY="/home/ubuntu/.ssh/tani.pem"
+SSH_USER="${SSH_USER:-ubuntu}"
+SSH_KEY="${SSH_KEY:-${HOME}/.ssh/tani.pem}"
+CONTROLLER="${CONTROLLER:-auto}"
 REMOTE_DIR="/home/ubuntu/woc"
-FIRST_SERVER="192.168.73.159"
+FIRST_SERVER="192.168.73.93"
+BASTION_PUBLIC_IP="134.87.11.79"
+BASTION_INTERNAL_IP="192.168.73.93"
+
+detect_controller_mode() {
+    case "$CONTROLLER" in
+        laptop|bastion) echo "$CONTROLLER" ;;
+        auto)
+            local ips
+            ips="$(hostname -I 2>/dev/null || true)"
+            if [[ " ${ips} " == *" ${BASTION_INTERNAL_IP} "* ]]; then
+                echo "bastion"
+            else
+                echo "laptop"
+            fi
+            ;;
+        *)
+            echo "ERROR: CONTROLLER must be auto, laptop, or bastion (got: $CONTROLLER)" >&2
+            exit 1
+            ;;
+    esac
+}
+
+CONTROLLER_MODE="$(detect_controller_mode)"
+
+if [ ! -f "$SSH_KEY" ]; then
+    echo "ERROR: SSH key not found: $SSH_KEY" >&2
+    echo "Set SSH_KEY=/path/to/key if it is stored elsewhere." >&2
+    exit 1
+fi
+
+SSH_BASE_OPTS=(-i "$SSH_KEY" -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new)
+PROXY_CMD="ssh -i '$SSH_KEY' -o BatchMode=yes -o StrictHostKeyChecking=accept-new -W %h:%p ${SSH_USER}@${BASTION_PUBLIC_IP}"
+
+ssh_opts_for() {
+    local host=$1
+    SSH_OPTS=("${SSH_BASE_OPTS[@]}")
+    SSH_IS_LOCAL=false
+
+    if [ "$CONTROLLER_MODE" = "bastion" ] && [ "$host" = "$BASTION_INTERNAL_IP" ]; then
+        SSH_IS_LOCAL=true
+        SSH_TARGET="localhost"
+    elif [ "$CONTROLLER_MODE" = "bastion" ]; then
+        SSH_TARGET="$host"
+    elif [ "$host" = "$BASTION_INTERNAL_IP" ]; then
+        SSH_TARGET="$BASTION_PUBLIC_IP"
+    else
+        SSH_OPTS+=(-o "ProxyCommand=$PROXY_CMD")
+        SSH_TARGET="$host"
+    fi
+}
+
+remote_exec() {
+    local host=$1
+    shift
+    ssh_opts_for "$host"
+    if [ "$SSH_IS_LOCAL" = true ]; then
+        bash -lc "$*"
+    else
+        ssh "${SSH_OPTS[@]}" "$SSH_USER@$SSH_TARGET" "$*"
+    fi
+}
+
+copy_glob_from_host() {
+    local host=$1
+    local remote_glob=$2
+    local local_dir=$3
+
+    mkdir -p "$local_dir"
+    ssh_opts_for "$host"
+    if [ "$SSH_IS_LOCAL" = true ]; then
+        cp $remote_glob "$local_dir/" 2>/dev/null || true
+    else
+        scp "${SSH_OPTS[@]}" "$SSH_USER@$SSH_TARGET:$remote_glob" "$local_dir/" 2>/dev/null || true
+    fi
+}
 
 # Create main results folder
 RESULTS_FOLDER="./eval_results_$(date +%Y%m%d_%H%M%S)"
@@ -20,6 +96,7 @@ echo "║              EVALUATION RESULTS COLLECTION                     ║"
 echo "╚════════════════════════════════════════════════════════════════╝"
 echo ""
 echo "Destination: $RESULTS_FOLDER"
+echo "Controller: $CONTROLLER_MODE"
 echo ""
 
 # Function to collect and organize eval results
@@ -86,7 +163,7 @@ EOF
     
     # Collect logs from first server
     echo "  Downloading logs from $FIRST_SERVER..."
-    ssh -i $SSH_KEY $USER@$FIRST_SERVER bash -c "
+    remote_exec "$FIRST_SERVER" "
     cd /home/ubuntu/woc/logs
     case $eval_name in
         1) tar -czf eval${eval_name}_logs.tar.gz server_*_indep_* client_*_indep_* 2>/dev/null || true ;;
@@ -96,7 +173,7 @@ EOF
     esac
     " 2>/dev/null || true
     
-    scp -i $SSH_KEY $USER@$FIRST_SERVER:/home/ubuntu/woc/logs/eval${eval_name}_logs.tar.gz "$eval_dir/" 2>/dev/null || true
+    copy_glob_from_host "$FIRST_SERVER" "/home/ubuntu/woc/logs/eval${eval_name}_logs.tar.gz" "$eval_dir"
     
     # Download CSV files organized by server/client
     echo "  Downloading CSV results by server/client..."
@@ -104,12 +181,12 @@ EOF
     # Create server/client subdirectories locally
     for id in 0 1 2 3 4; do
         mkdir -p "$eval_csv_dir/server${id}"
-        scp -i $SSH_KEY $USER@$FIRST_SERVER:/home/ubuntu/woc/eval/server${id}/*.csv "$eval_csv_dir/server${id}/" 2>/dev/null || true
+        copy_glob_from_host "$FIRST_SERVER" "/home/ubuntu/woc/eval/server${id}/*.csv" "$eval_csv_dir/server${id}"
     done
     
     for id in 0 1; do
         mkdir -p "$eval_csv_dir/client${id}"
-        scp -i $SSH_KEY $USER@$FIRST_SERVER:/home/ubuntu/woc/eval/client${id}/*.csv "$eval_csv_dir/client${id}/" 2>/dev/null || true
+        copy_glob_from_host "$FIRST_SERVER" "/home/ubuntu/woc/eval/client${id}/*.csv" "$eval_csv_dir/client${id}"
     done
     
     # Merge all server CSVs together
