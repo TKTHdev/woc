@@ -135,10 +135,12 @@ def merge_client_csvs(
     total_fast = 0
     total_slow = 0
     total_conflict = 0
+    total_error = 0
     all_throughputs: list[float] = []
     fast_latencies: list[float] = []
     slow_latencies: list[float] = []
     total_fallbacks = 0
+    error_counted_from_global = False
 
     client_dirs_all = [
         d
@@ -186,7 +188,10 @@ def merge_client_csvs(
                 try:
                     int(label)
                     lat = _parse_float(_cell(row, 1))
-                    if lat is not None and lat > 0:
+                    fast_ops = _parse_int(_cell(row, 3)) or 0
+                    slow_ops = _parse_int(_cell(row, 4)) or 0
+                    error_ops = _parse_int(_cell(row, 6)) or 0
+                    if lat is not None and lat > 0 and (fast_ops + slow_ops > 0 or error_ops == 0):
                         all_latencies.append(lat)
                     continue
                 except ValueError:
@@ -212,10 +217,12 @@ def merge_client_csvs(
                     fast_str = _cell(row, 3)
                     slow_str = _cell(row, 4)
                     conflict_str = _cell(row, 5)
+                    error_str = _cell(row, 6)
                     
                     fast_val = _parse_int(fast_str)
                     slow_val = _parse_int(slow_str)
                     conflict_val = _parse_int(conflict_str)
+                    error_val = _parse_int(error_str)
                     
                     if fast_val is not None:
                         total_fast += fast_val
@@ -223,10 +230,17 @@ def merge_client_csvs(
                         total_slow += slow_val
                     if conflict_val is not None:
                         total_conflict += conflict_val
+                    if error_val is not None:
+                        total_error += error_val
+                        error_counted_from_global = True
                 elif label == "TOTAL_FAST_PATH_FALLBACKS":
                     val = _parse_int(_cell(row, 1))
                     if val is not None:
                         total_fallbacks += val
+                elif label == "TOTAL_ERROR_COMMITS":
+                    val = _parse_int(_cell(row, 1))
+                    if val is not None and not error_counted_from_global:
+                        total_error += val
 
     if not all_latencies:
         raise RuntimeError("No latency data found in client CSV files")
@@ -249,7 +263,7 @@ def merge_client_csvs(
     avg_fast_lat = sum(fast_latencies) / len(fast_latencies) if fast_latencies else 0.0
     avg_slow_lat = sum(slow_latencies) / len(slow_latencies) if slow_latencies else 0.0
 
-    total_ops = total_fast + total_slow + total_conflict
+    total_ops = total_fast + total_slow
     fast_ratio = (total_fast / total_ops) if total_ops > 0 else 0.0
     slow_ratio = (total_slow / total_ops) if total_ops > 0 else 0.0
 
@@ -268,6 +282,7 @@ def merge_client_csvs(
         writer.writerow(["TOTAL_FAST_COMMITS", total_fast, f"{fast_ratio * 100:.1f}%"])
         writer.writerow(["TOTAL_SLOW_COMMITS", total_slow, f"{slow_ratio * 100:.1f}%"])
         writer.writerow(["TOTAL_CONFLICT_COMMITS", total_conflict, ""])
+        writer.writerow(["TOTAL_ERROR_COMMITS", total_error, ""])
         writer.writerow(["TOTAL_FAST_PATH_FALLBACKS", total_fallbacks, ""])
 
     print(f"\nMerged CSV written to: {output_path}")
@@ -293,6 +308,7 @@ def merge_server_csvs(
     total_fast = 0
     total_slow = 0
     total_conflict = 0
+    total_error = 0
     all_throughputs: list[float] = []
     fast_latencies: list[float] = []
     slow_latencies: list[float] = []
@@ -301,6 +317,7 @@ def merge_server_csvs(
     summary_p50_latencies: list[float] = []
     summary_p95_latencies: list[float] = []
     summary_p99_latencies: list[float] = []
+    error_counted_from_global = False
 
     server_dirs_all = [
         d
@@ -348,7 +365,10 @@ def merge_server_csvs(
                 try:
                     int(label)
                     lat = _parse_float(_cell(row, 1))
-                    if lat is not None and lat > 0:
+                    fast_ops = _parse_int(_cell(row, 3)) or 0
+                    slow_ops = _parse_int(_cell(row, 4)) or 0
+                    error_ops = _parse_int(_cell(row, 6)) or 0
+                    if lat is not None and lat > 0 and (fast_ops + slow_ops > 0 or error_ops == 0):
                         all_latencies.append(lat)
                     continue
                 except ValueError:
@@ -359,9 +379,6 @@ def merge_server_csvs(
                     avg_lat = _parse_float(_cell(row, 1))
                     if avg_lat is not None:
                         summary_avg_latencies.append(avg_lat)
-                    tpt = _parse_float(_cell(row, 2))
-                    if tpt is not None:
-                        all_throughputs.append(tpt)
                 if label == "THROUGHPUT":
                     tpt = _parse_float(_cell(row, 2))
                     if tpt is not None:
@@ -393,10 +410,12 @@ def merge_server_csvs(
                     fast_str = _cell(row, 3)
                     slow_str = _cell(row, 4)
                     conflict_str = _cell(row, 5)
+                    error_str = _cell(row, 6)
                     
                     fast_val = _parse_int(fast_str)
                     slow_val = _parse_int(slow_str)
                     conflict_val = _parse_int(conflict_str)
+                    error_val = _parse_int(error_str)
                     
                     if fast_val is not None:
                         total_fast += fast_val
@@ -404,10 +423,17 @@ def merge_server_csvs(
                         total_slow += slow_val
                     if conflict_val is not None:
                         total_conflict += conflict_val
+                    if error_val is not None:
+                        total_error += error_val
+                        error_counted_from_global = True
                 elif label == "TOTAL_FAST_PATH_FALLBACKS":
                     val = _parse_int(_cell(row, 1))
                     if val is not None:
                         total_fallbacks += val
+                elif label == "TOTAL_ERROR_COMMITS":
+                    val = _parse_int(_cell(row, 1))
+                    if val is not None and not error_counted_from_global:
+                        total_error += val
 
     output_path = _resolve_output(eval_dir, output, "servers")
     out_dir = os.path.dirname(output_path)
@@ -436,7 +462,7 @@ def merge_server_csvs(
     avg_fast_lat = sum(fast_latencies) / len(fast_latencies) if fast_latencies else 0.0
     avg_slow_lat = sum(slow_latencies) / len(slow_latencies) if slow_latencies else 0.0
 
-    total_ops = total_fast + total_slow + total_conflict
+    total_ops = total_fast + total_slow
     fast_ratio = (total_fast / total_ops) if total_ops > 0 else 0.0
     slow_ratio = (total_slow / total_ops) if total_ops > 0 else 0.0
 
@@ -455,6 +481,7 @@ def merge_server_csvs(
         writer.writerow(["TOTAL_FAST_COMMITS", total_fast, f"{fast_ratio * 100:.1f}%"])
         writer.writerow(["TOTAL_SLOW_COMMITS", total_slow, f"{slow_ratio * 100:.1f}%"])
         writer.writerow(["TOTAL_CONFLICT_COMMITS", total_conflict, ""])
+        writer.writerow(["TOTAL_ERROR_COMMITS", total_error, ""])
         writer.writerow(["TOTAL_FAST_PATH_FALLBACKS", total_fallbacks, ""])
 
     print(f"\nMerged server CSV written to: {output_path}")

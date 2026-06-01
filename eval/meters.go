@@ -20,23 +20,25 @@ type BatchMetrics struct {
 	FastPathCount int
 	SlowPathCount int
 	ConflictCount int
+	ErrorCount    int
 }
 
 type PerfMeter struct {
-	numOfTotalTx   int
-	batchSize      int
-	sampleInterval prioClock
-	lastPClock     prioClock
-	fileName       string
-	meters         sync.Map // Lock-free concurrent map: prioClock -> *RecordInstance
-	FastCommits     int64
-	SlowCommits     int64
-	ConflictCommits int64
-    FastPathFallbacks int64 // Track fast path failures to slow path
-    fastPathLatencySum int64
-    fastPathCount      int64
-    slowPathLatencySum int64
-    slowPathCount      int64
+	numOfTotalTx       int
+	batchSize          int
+	sampleInterval     prioClock
+	lastPClock         prioClock
+	fileName           string
+	meters             sync.Map // Lock-free concurrent map: prioClock -> *RecordInstance
+	FastCommits        int64
+	SlowCommits        int64
+	ConflictCommits    int64
+	ErrorCommits       int64
+	FastPathFallbacks  int64 // Track fast path failures to slow path
+	fastPathLatencySum int64
+	fastPathCount      int64
+	slowPathLatencySum int64
+	slowPathCount      int64
 }
 
 type RecordInstance struct {
@@ -44,7 +46,6 @@ type RecordInstance struct {
 	TimeElapsed float64
 	Metrics     BatchMetrics
 }
-
 
 // ---------------- Initialization ----------------
 func (m *PerfMeter) Init(interval, batchSize int, fileName string) {
@@ -107,6 +108,13 @@ func (m *PerfMeter) IncConflict(globalClock int) {
 	}
 }
 
+func (m *PerfMeter) IncError(globalClock int) {
+	if val, ok := m.meters.Load(globalClock); ok {
+		rec := val.(*RecordInstance)
+		rec.Metrics.ErrorCount++
+	}
+}
+
 func (pm *PerfMeter) RecordFastCommit() {
 	atomic.AddInt64(&pm.FastCommits, 1)
 }
@@ -137,9 +145,16 @@ func (pm *PerfMeter) AddConflictCommits(n int) {
 	atomic.AddInt64(&pm.ConflictCommits, int64(n))
 }
 
+func (pm *PerfMeter) AddErrorCommits(n int) {
+	if n <= 0 {
+		return
+	}
+	atomic.AddInt64(&pm.ErrorCommits, int64(n))
+}
+
 // Track when fast path fails and falls back to slow path
 func (pm *PerfMeter) RecordFastPathFallback() {
-    atomic.AddInt64(&pm.FastPathFallbacks, 1)
+	atomic.AddInt64(&pm.FastPathFallbacks, 1)
 }
 
 // ---------------- Save to file ----------------
@@ -193,16 +208,19 @@ func (m *PerfMeter) SaveToFile() error {
 
 	fmt.Printf("[DEBUG-METRICS] Total keys in sync.Map: %d\n", len(keys))
 
-	err = writer.Write([]string{"pclock", "latency (ms) per batch", "throughput (Tx/sec)", "fast path ops", "slow path ops", "conflict ops"})
+	err = writer.Write([]string{"pclock", "latency (ms) per batch", "throughput (Tx/sec)", "fast path ops", "slow path ops", "conflict ops", "error ops"})
 	if err != nil {
 		return err
 	}
 
 	counter := 0
-	var latSum float64 = 0 
+	var latSum float64 = 0
 	var tptSum float64 = 0
-	var latencies []float64  
-	var fastSum, slowSum, conflictSum int = 0, 0, 0  
+	var latencies []float64
+	var fastSum, slowSum, conflictSum, errorSum int = 0, 0, 0, 0
+	var earliestStart time.Time
+	var latestEnd time.Time
+	haveWallClockWindow := false
 
 	for _, key := range keys {
 		val, ok := m.meters.Load(key)
@@ -215,16 +233,33 @@ func (m *PerfMeter) SaveToFile() error {
 			continue
 		}
 
-		latSum += value.TimeElapsed 
-		counter++
-		latencies = append(latencies, value.TimeElapsed)  
+		lat := value.TimeElapsed
+		successOps := value.Metrics.FastPathCount + value.Metrics.SlowPathCount
+		tpt := (float64(successOps) / float64(lat)) * 1000
+		tptSum += tpt
+
 		fastSum += value.Metrics.FastPathCount
 		slowSum += value.Metrics.SlowPathCount
 		conflictSum += value.Metrics.ConflictCount
-
-		lat := value.TimeElapsed
-		tpt := (float64(m.batchSize) / float64(lat)) * 1000
-		tptSum += tpt 
+		errorSum += value.Metrics.ErrorCount
+		if successOps > 0 {
+			latSum += value.TimeElapsed
+			counter++
+			latencies = append(latencies, value.TimeElapsed)
+			endTime := value.StartTime.Add(time.Duration(value.TimeElapsed * float64(time.Millisecond)))
+			if !haveWallClockWindow {
+				earliestStart = value.StartTime
+				latestEnd = endTime
+				haveWallClockWindow = true
+			} else {
+				if value.StartTime.Before(earliestStart) {
+					earliestStart = value.StartTime
+				}
+				if endTime.After(latestEnd) {
+					latestEnd = endTime
+				}
+			}
+		}
 
 		err = writer.Write([]string{
 			strconv.Itoa(key),
@@ -233,6 +268,7 @@ func (m *PerfMeter) SaveToFile() error {
 			strconv.Itoa(value.Metrics.FastPathCount),
 			strconv.Itoa(value.Metrics.SlowPathCount),
 			strconv.Itoa(value.Metrics.ConflictCount),
+			strconv.Itoa(value.Metrics.ErrorCount),
 		})
 		if err != nil {
 			return err
@@ -241,7 +277,7 @@ func (m *PerfMeter) SaveToFile() error {
 
 	if counter == 0 {
 		// No completed batches recorded. Write a NO_DATA row and still emit global totals
-		_ = writer.Write([]string{"NO_DATA", "", "", "", "", ""})
+		_ = writer.Write([]string{"NO_DATA", "", "", "", "", "", ""})
 		// Still write global totals (likely zeros)
 		err = writer.Write([]string{
 			"GLOBAL_TOTALS",
@@ -250,6 +286,7 @@ func (m *PerfMeter) SaveToFile() error {
 			strconv.FormatInt(m.FastCommits, 10) + " ops",
 			strconv.FormatInt(m.SlowCommits, 10) + " ops",
 			strconv.FormatInt(m.ConflictCommits, 10) + " ops",
+			strconv.FormatInt(m.ErrorCommits, 10) + " ops",
 		})
 		if err != nil {
 			return err
@@ -257,26 +294,21 @@ func (m *PerfMeter) SaveToFile() error {
 		return nil
 	}
 
-	
-	avgLatency := latSum / float64(counter) 
-	// Calculate actual wall-clock throughput
-	firstVal, _ := m.meters.Load(keys[0])
-	firstBatch := firstVal.(*RecordInstance)
-	lastVal, _ := m.meters.Load(keys[len(keys)-1])
-	lastBatch := lastVal.(*RecordInstance)
-	lastEndTime := lastBatch.StartTime.Add(time.Duration(lastBatch.TimeElapsed) * time.Millisecond)
-	totalWallClockSeconds := lastEndTime.Sub(firstBatch.StartTime).Seconds()
-
-	// This is your TRUE throughput (Tx/sec)
-	actualThroughput := float64(m.batchSize*counter) / totalWallClockSeconds
+	avgLatency := latSum / float64(counter)
+	totalWallClockSeconds := latestEnd.Sub(earliestStart).Seconds()
+	actualThroughput := 0.0
+	if haveWallClockWindow && totalWallClockSeconds > 0 {
+		actualThroughput = float64(fastSum+slowSum) / totalWallClockSeconds
+	}
 
 	avgFast := float64(fastSum) / float64(counter)
 	avgSlow := float64(slowSum) / float64(counter)
 	avgConflict := float64(conflictSum) / float64(counter)
+	avgError := float64(errorSum) / float64(counter)
 
 	// Calculate tail latencies (p50, p95, p99)
-	var fastPathLatencies []float64  
-	var slowPathLatencies []float64   
+	var fastPathLatencies []float64
+	var slowPathLatencies []float64
 
 	for _, key := range keys {
 		val, ok := m.meters.Load(key)
@@ -290,13 +322,13 @@ func (m *PerfMeter) SaveToFile() error {
 
 		// Track fast path vs slow path latencies
 		if value.Metrics.FastPathCount > value.Metrics.SlowPathCount {
-			fastPathLatencies = append(fastPathLatencies, value.TimeElapsed)  
+			fastPathLatencies = append(fastPathLatencies, value.TimeElapsed)
 		} else if value.Metrics.SlowPathCount > 0 {
-			slowPathLatencies = append(slowPathLatencies, value.TimeElapsed)  
+			slowPathLatencies = append(slowPathLatencies, value.TimeElapsed)
 		}
 	}
 
-	sort.Float64s(latencies)   
+	sort.Float64s(latencies)
 
 	p50Latency := latencies[len(latencies)*50/100]
 	p95Latency := latencies[len(latencies)*95/100]
@@ -308,17 +340,17 @@ func (m *PerfMeter) SaveToFile() error {
 	var avgSlowPathLatency float64
 
 	if len(fastPathLatencies) > 0 {
-		var fastSum float64  
+		var fastSum float64
 		for _, lat := range fastPathLatencies {
-			fastSum += lat  
+			fastSum += lat
 		}
 		avgFastPathLatency = fastSum / float64(len(fastPathLatencies))
 	}
 
 	if len(slowPathLatencies) > 0 {
-		var slowSum float64  
+		var slowSum float64
 		for _, lat := range slowPathLatencies {
-			slowSum += lat   
+			slowSum += lat
 		}
 		avgSlowPathLatency = slowSum / float64(len(slowPathLatencies))
 	}
@@ -331,6 +363,7 @@ func (m *PerfMeter) SaveToFile() error {
 		strconv.FormatFloat(avgFast, 'f', 3, 64),
 		strconv.FormatFloat(avgSlow, 'f', 3, 64),
 		strconv.FormatFloat(avgConflict, 'f', 3, 64),
+		strconv.FormatFloat(avgError, 'f', 3, 64),
 	})
 	if err != nil {
 		return err
@@ -344,15 +377,16 @@ func (m *PerfMeter) SaveToFile() error {
 		"",
 		"",
 		"",
+		"",
 	})
 	if err != nil {
 		return err
 	}
 
-
 	err = writer.Write([]string{
 		"P50_LATENCY",
-		strconv.FormatFloat(p50Latency, 'f', 0, 64) + " ms",  
+		strconv.FormatFloat(p50Latency, 'f', 0, 64) + " ms",
+		"",
 		"",
 		"",
 		"",
@@ -364,7 +398,8 @@ func (m *PerfMeter) SaveToFile() error {
 
 	err = writer.Write([]string{
 		"P95_LATENCY",
-		strconv.FormatFloat(p95Latency, 'f', 0, 64) + " ms",  
+		strconv.FormatFloat(p95Latency, 'f', 0, 64) + " ms",
+		"",
 		"",
 		"",
 		"",
@@ -376,7 +411,8 @@ func (m *PerfMeter) SaveToFile() error {
 
 	err = writer.Write([]string{
 		"P99_LATENCY",
-		strconv.FormatFloat(p99Latency, 'f', 0, 64) + " ms",  
+		strconv.FormatFloat(p99Latency, 'f', 0, 64) + " ms",
+		"",
 		"",
 		"",
 		"",
@@ -390,6 +426,7 @@ func (m *PerfMeter) SaveToFile() error {
 	err = writer.Write([]string{
 		"AVG_LATENCY_PER_TX",
 		strconv.FormatFloat(avgLatencyPerTx, 'f', 3, 64) + " ms/Tx",
+		"",
 		"",
 		"",
 		"",
@@ -408,22 +445,24 @@ func (m *PerfMeter) SaveToFile() error {
 			strconv.Itoa(len(fastPathLatencies)) + " batches",
 			"",
 			"",
+			"",
 		})
 		if err != nil {
 			return err
 		}
-        // Write fast path latency per transaction
-        err = writer.Write([]string{
-            "AVG_FAST_PATH_LATENCY_PER_TX",
-            strconv.FormatFloat(avgFastPathLatency/float64(m.batchSize), 'f', 3, 64) + " ms/Tx",
-            "",
-            "",
-            "",
-            "",
-        })
-        if err != nil {
-            return err
-        }
+		// Write fast path latency per transaction
+		err = writer.Write([]string{
+			"AVG_FAST_PATH_LATENCY_PER_TX",
+			strconv.FormatFloat(avgFastPathLatency/float64(m.batchSize), 'f', 3, 64) + " ms/Tx",
+			"",
+			"",
+			"",
+			"",
+			"",
+		})
+		if err != nil {
+			return err
+		}
 	}
 
 	// Write slow path specific latency
@@ -435,22 +474,24 @@ func (m *PerfMeter) SaveToFile() error {
 			"",
 			strconv.Itoa(len(slowPathLatencies)) + " batches",
 			"",
+			"",
 		})
 		if err != nil {
 			return err
 		}
-        // Write slow path latency per transaction
-        err = writer.Write([]string{
-            "AVG_SLOW_PATH_LATENCY_PER_TX",
-            strconv.FormatFloat(avgSlowPathLatency/float64(m.batchSize), 'f', 3, 64) + " ms/Tx",
-            "",
-            "",
-            "",
-            "",
-        })
-        if err != nil {
-            return err
-        }
+		// Write slow path latency per transaction
+		err = writer.Write([]string{
+			"AVG_SLOW_PATH_LATENCY_PER_TX",
+			strconv.FormatFloat(avgSlowPathLatency/float64(m.batchSize), 'f', 3, 64) + " ms/Tx",
+			"",
+			"",
+			"",
+			"",
+			"",
+		})
+		if err != nil {
+			return err
+		}
 	}
 
 	// Write global totals row (operation counts, not batch counts)
@@ -461,18 +502,18 @@ func (m *PerfMeter) SaveToFile() error {
 		strconv.FormatInt(m.FastCommits, 10) + " ops",
 		strconv.FormatInt(m.SlowCommits, 10) + " ops",
 		strconv.FormatInt(m.ConflictCommits, 10) + " ops",
+		strconv.FormatInt(m.ErrorCommits, 10) + " ops",
 	})
 	if err != nil {
 		return err
 	}
 
+	// Write fast path fallback count
+	err = writer.Write([]string{"TOTAL_FAST_PATH_FALLBACKS", strconv.FormatInt(m.FastPathFallbacks, 10), "ops"})
+	if err != nil {
+		return err
+	}
 
-    // Write fast path fallback count
-    err = writer.Write([]string{"TOTAL_FAST_PATH_FALLBACKS", strconv.FormatInt(m.FastPathFallbacks, 10), "ops"})
-    if err != nil {
-        return err
-    }
-	
 	err = writer.Write([]string{"TOTAL_FAST_COMMITS", strconv.FormatInt(m.FastCommits, 10), "ops"})
 	if err != nil {
 		return err
@@ -485,11 +526,13 @@ func (m *PerfMeter) SaveToFile() error {
 	if err != nil {
 		return err
 	}
-	
+	err = writer.Write([]string{"TOTAL_ERROR_COMMITS", strconv.FormatInt(m.ErrorCommits, 10), "ops"})
+	if err != nil {
+		return err
+	}
 
 	return nil
 }
-
 
 func (m *PerfMeter) RecordFastPathLatency(latencyMs float64) {
 	latencyUs := int64(latencyMs * 1000)
