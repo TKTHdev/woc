@@ -2,14 +2,14 @@ package main
 
 import (
 	"fmt"
+	"github.com/sirupsen/logrus"
 	"net"
 	"net/rpc"
 	"os"
 	"os/signal"
+	"sync/atomic"
 	"syscall"
 	"time"
-	"sync/atomic"
-	"github.com/sirupsen/logrus"
 	"woc/config"
 	"woc/eval"
 	"woc/mongodb"
@@ -26,7 +26,7 @@ var (
 	myAddr          string
 	pscheme         []float64
 	serverConfigs   [][]string
-	activeRPCs      atomic.Int64 
+	activeRPCs      atomic.Int64
 )
 
 // Type aliases
@@ -42,7 +42,7 @@ func main() {
 
 	loadCommandLineInputs()
 	if logLevel == "debug" || logLevel == "trace" {
-		logLevel = "info"  // Disable verbose logging in production
+		logLevel = "info" // Disable verbose logging in production
 	}
 	SetLogger(logLevel, myServerID, production)
 
@@ -104,13 +104,13 @@ func main() {
 func preWarmAllObjects() {
 	log.Infof("Server %d: Pre-warming objects for cloud deployment...", myServerID)
 	startTime := time.Now()
-	
+
 	conns.RLock()
 	numReplicas := len(conns.m) + 1
 	conns.RUnlock()
-	maxClientID := numOfServers + 20  // Safe upper bound
+	maxClientID := numOfServers + 20 // Safe upper bound
 	log.Infof("Server %d: Pre-warming objects for client IDs %d-%d", myServerID, 0, maxClientID-1)
-	
+
 	for clientID := 0; clientID < maxClientID; clientID++ {
 		for i := 0; i < 100000; i++ {
 			objID := fmt.Sprintf("obj-indep-%d-%d", clientID, i)
@@ -122,15 +122,15 @@ func preWarmAllObjects() {
 		objID := fmt.Sprintf("obj-common-%d", i)
 		cm.mystate.AddObject(objID, CommonObject, numReplicas)
 	}
-	
+
 	for i := 0; i < 10; i++ {
 		objID := fmt.Sprintf("obj-HOT-%d", i)
 		cm.mystate.AddObject(objID, HotObject, numReplicas)
 	}
-	
+
 	duration := time.Since(startTime)
 	totalWarmed := (maxClientID * 100000) + 10000 + 10
-	log.Infof("Server %d: ✓ Pre-warmed %d objects in %v (Hot=10, Indep=%dM, Common=10K)", 
+	log.Infof("Server %d: ✓ Pre-warmed %d objects in %v (Hot=10, Indep=%dM, Common=10K)",
 		myServerID, totalWarmed, duration, maxClientID)
 }
 
@@ -175,21 +175,20 @@ func runServerRole() {
 
 	// Shutdown handler: save metrics and wait for active RPCs
 	var serverShuttingDown atomic.Bool
-	var activeRPCs atomic.Int64  // Track active RPC handlers
-	
+
 	sigc := make(chan os.Signal, 10)
 	signal.Notify(sigc, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
 		sig := <-sigc
 		log.Infof("Server %d: Received signal %v - starting graceful shutdown...", myServerID, sig)
 		fmt.Printf("\n  Server %d: Received signal %v - starting graceful shutdown...\n", myServerID, sig)
-		
+
 		serverShuttingDown.Store(true)
-		
+
 		// Stop accepting new connections
 		listener.Close()
 		log.Infof("Server %d: Stopped accepting new connections", myServerID)
-		
+
 		// Wait for active RPCs to complete (up to 10 seconds)
 		deadline := time.Now().Add(10 * time.Second)
 		for {
@@ -199,35 +198,29 @@ func runServerRole() {
 				fmt.Printf("Server %d: ✓ All active RPCs completed\n", myServerID)
 				break
 			}
-			
+
 			if time.Now().After(deadline) {
 				log.Warnf("Server %d:  Timeout - %d RPCs still active", myServerID, active)
 				fmt.Printf("Server %d:  Timeout - %d RPCs still active\n", myServerID, active)
 				break
 			}
-			
+
 			time.Sleep(100 * time.Millisecond)
 		}
-		
+
 		// Save metrics
 		log.Infof("Server %d:  Saving metrics...", myServerID)
 		fmt.Printf("Server %d:  Saving metrics...\n", myServerID)
-		
-		if err := perfM.SaveToFile(); err != nil {
-			log.Errorf("Server %d: Failed to save perf metrics: %v", myServerID, err)
-		} else {
-			log.Infof("Server %d: Performance metrics saved", myServerID)
-		}
-		
+
 		if err := cm.SaveServerMetrics(); err != nil {
 			log.Errorf("Server %d: Failed to save server metrics: %v", myServerID, err)
 		} else {
 			log.Infof("Server %d: Server metrics saved", myServerID)
 		}
-		
+
 		// File flush
 		time.Sleep(2 * time.Second)
-		
+
 		fmt.Printf("Server %d:  Shutdown complete\n", myServerID)
 		os.Exit(0)
 	}()
@@ -235,6 +228,7 @@ func runServerRole() {
 	// Keep server running
 	select {}
 }
+
 // ------------------ CLIENT ROLE ------------------
 func runClientRole(batchMode string) {
 	log.Infof("Client %d: waiting for cluster to stabilize...", myServerID)

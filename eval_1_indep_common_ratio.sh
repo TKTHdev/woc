@@ -238,11 +238,15 @@ start_workload_nodes() {
 }
 
 stop_workload_nodes() {
-    for ip in "${SERVER_IPS[@]}" "${CLIENT_HOST_IPS[@]}"; do
+    for ip in "${CLIENT_HOST_IPS[@]}"; do
         remote_exec "$ip" "pkill -TERM -x woc 2>/dev/null || true"
     done
-    sleep 3
-    for ip in "${SERVER_IPS[@]}" "${CLIENT_HOST_IPS[@]}"; do
+    sleep 8
+    for ip in "${SERVER_IPS[@]}"; do
+        remote_exec "$ip" "pkill -TERM -x woc 2>/dev/null || true"
+    done
+    sleep 12
+    for ip in "${CLIENT_HOST_IPS[@]}" "${SERVER_IPS[@]}"; do
         remote_exec "$ip" "pkill -9 -x woc 2>/dev/null || true"
     done
 }
